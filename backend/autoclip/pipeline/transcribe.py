@@ -57,9 +57,11 @@ def resolve_compute(settings: WhisperSettings, gpu: GPUInfo | None = None) -> tu
 def parse_youtube_captions(json3_path: Path) -> Transcript | None:
     """Parse a YouTube json3 automatic-caption file into a Transcript.
 
-    Word timestamps are approximated by distributing each segment's duration
-    linearly across its words — precise enough for clip boundaries without
-    running Whisper.  Returns ``None`` if the file is missing or malformed.
+    Word timestamps use per-segment ``tOffsetMs`` values when present in the
+    json3 ``segs`` array — YouTube auto-captions include these for karaoke-style
+    highlighting, giving us phrase-level timing within each caption event.  When
+    no offsets are present the event duration is distributed linearly across its
+    words as a fallback.  Returns ``None`` if the file is missing or malformed.
     """
     try:
         data = json.loads(json3_path.read_text(encoding="utf-8"))
@@ -76,31 +78,64 @@ def parse_youtube_captions(json3_path: Path) -> Transcript | None:
         if not segs:
             continue  # structural / window-init events have no text
 
-        start_s = event.get("tStartMs", 0) / 1000.0
-        dur_s = event.get("dDurationMs", 0) / 1000.0
-        end_s = start_s + dur_s
+        event_start_ms: int = event.get("tStartMs", 0)
+        event_dur_ms: int = event.get("dDurationMs", 0)
+        event_end_ms: int = event_start_ms + event_dur_ms
 
-        text = "".join(s.get("utf8", "") for s in segs).strip()
-        if not text:
+        # Collect non-empty segs with their millisecond offsets from event start.
+        timed: list[tuple[int, str]] = []  # (offset_ms, text)
+        for seg in segs:
+            seg_text = seg.get("utf8", "")
+            if not seg_text or not seg_text.strip():
+                continue
+            timed.append((seg.get("tOffsetMs", 0), seg_text))
+
+        if not timed:
             continue
 
-        raw_words = text.split()
-        if not raw_words:
+        full_text = "".join(t for _, t in timed).strip()
+        if not full_text:
             continue
 
         first_word = len(words)
-        word_dur = dur_s / len(raw_words) if raw_words else 0.0
-        for i, w in enumerate(raw_words):
-            words.append(Word(
-                text=w,
-                start=start_s + i * word_dur,
-                end=start_s + (i + 1) * word_dur,
-            ))
+
+        # Use per-seg timing when offsets vary (i.e. YouTube embedded timing).
+        # Fall back to linear distribution across the whole event otherwise.
+        offsets_vary = len({o for o, _ in timed}) > 1 or timed[0][0] > 0
+        if offsets_vary:
+            for i, (offset_ms, seg_text) in enumerate(timed):
+                seg_start_ms = event_start_ms + offset_ms
+                seg_end_ms = (event_start_ms + timed[i + 1][0]) if i + 1 < len(timed) else event_end_ms
+                seg_end_ms = max(seg_start_ms, seg_end_ms)
+
+                raw = seg_text.split()
+                if not raw:
+                    continue
+                seg_ms = seg_end_ms - seg_start_ms
+                w_ms = seg_ms / len(raw) if raw else 0.0
+                for j, w in enumerate(raw):
+                    words.append(Word(
+                        text=w,
+                        start=(seg_start_ms + j * w_ms) / 1000.0,
+                        end=(seg_start_ms + (j + 1) * w_ms) / 1000.0,
+                    ))
+        else:
+            raw_words = full_text.split()
+            w_ms = event_dur_ms / len(raw_words) if raw_words else 0.0
+            for i, w in enumerate(raw_words):
+                words.append(Word(
+                    text=w,
+                    start=(event_start_ms + i * w_ms) / 1000.0,
+                    end=(event_start_ms + (i + 1) * w_ms) / 1000.0,
+                ))
+
         last_word = len(words) - 1
+        if last_word < first_word:
+            continue
         segments.append(Segment(
-            text=text,
-            start=start_s,
-            end=end_s,
+            text=full_text,
+            start=event_start_ms / 1000.0,
+            end=event_end_ms / 1000.0,
             first_word=first_word,
             last_word=last_word,
         ))
