@@ -204,6 +204,9 @@ class Export:
     style: str = "bold_pop"
     size_bytes: int = 0
     created_at: str = field(default_factory=utcnow)
+    #: "pending" while ffmpeg is running, "done" on success, "failed" on error.
+    status: str = "done"
+    error: str | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Export:
@@ -215,4 +218,6 @@ class Export:
             style=row["style"],
             size_bytes=row["size_bytes"],
             created_at=row["created_at"],
+            status=row["status"],
+            error=row["error"],
         )

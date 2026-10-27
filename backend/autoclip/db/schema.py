@@ -116,9 +116,19 @@ def _migration_v2(conn: sqlite3.Connection) -> None:
     conn.executescript(_V2)
 
 
+_V3 = """
+ALTER TABLE exports ADD COLUMN status TEXT NOT NULL DEFAULT 'done';
+ALTER TABLE exports ADD COLUMN error  TEXT;
+"""
+
+
+def _migration_v3(conn: sqlite3.Connection) -> None:
+    conn.executescript(_V3)
+
+
 #: Ordered migrations. Index + 1 is the resulting ``user_version``.
 #: Append only — never edit a migration that has shipped.
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migration_v1, _migration_v2]
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migration_v1, _migration_v2, _migration_v3]
 
 SCHEMA_VERSION = len(MIGRATIONS)
 

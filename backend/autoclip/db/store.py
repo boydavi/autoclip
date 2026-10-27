@@ -424,8 +424,8 @@ def create_export(export: Export) -> Export:
     with connection() as conn:
         conn.execute(
             """
-            INSERT INTO exports (id, clip_id, path, ratio, style, size_bytes, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO exports (id, clip_id, path, ratio, style, size_bytes, created_at, status, error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 export.id,
@@ -435,9 +435,31 @@ def create_export(export: Export) -> Export:
                 export.style,
                 export.size_bytes,
                 export.created_at,
+                export.status,
+                export.error,
             ),
         )
     return export
+
+
+def update_export_status(
+    export_id: str,
+    status: str,
+    *,
+    size_bytes: int | None = None,
+    error: str | None = None,
+) -> None:
+    with connection() as conn:
+        conn.execute(
+            """
+            UPDATE exports
+            SET status = ?,
+                size_bytes = COALESCE(?, size_bytes),
+                error = ?
+            WHERE id = ?
+            """,
+            (status, size_bytes, error, export_id),
+        )
 
 
 def get_export(export_id: str) -> Export | None:

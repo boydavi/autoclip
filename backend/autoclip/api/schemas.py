@@ -130,6 +130,9 @@ class ExportOut(BaseModel):
     size_bytes: int
     created_at: str
     download_url: str
+    #: "pending" while rendering, "done" when the file is ready, "failed" on error.
+    status: str = "done"
+    error: str | None = None
 
     @classmethod
     def of(cls, export: models.Export) -> ExportOut:
@@ -141,6 +144,8 @@ class ExportOut(BaseModel):
             size_bytes=export.size_bytes,
             created_at=export.created_at,
             download_url=f"/api/exports/{export.id}/download",
+            status=export.status,
+            error=export.error,
         )
 
 

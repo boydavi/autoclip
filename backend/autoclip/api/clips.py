@@ -6,7 +6,7 @@ import asyncio
 import logging
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
 
 from .. import paths
@@ -168,9 +168,17 @@ async def patch_captions(clip_id: str, payload: CaptionPatchIn) -> ClipOut:
     return await asyncio.to_thread(_clip_out, clip)
 
 
-@router.post("/clips/{clip_id}/export", response_model=ExportOut, status_code=201)
-async def export_clip(clip_id: str, payload: ExportRequestIn) -> ExportOut:
-    """Render one clip and return its download link."""
+@router.post("/clips/{clip_id}/export", response_model=ExportOut, status_code=202)
+async def export_clip(
+    clip_id: str, payload: ExportRequestIn, background_tasks: BackgroundTasks
+) -> ExportOut:
+    """Start rendering a clip and return immediately.
+
+    The export record is created with ``status="pending"`` and the ffmpeg render
+    runs in the background so the thread pool stays available for other requests.
+    Poll ``GET /api/exports/{id}`` until ``status`` becomes ``"done"`` or
+    ``"failed"``, then use ``download_url`` to fetch the file.
+    """
     clip = await asyncio.to_thread(store.get_clip, clip_id)
     if clip is None:
         raise HTTPException(status_code=404, detail="Clip not found.")
@@ -202,7 +210,7 @@ async def export_clip(clip_id: str, payload: ExportRequestIn) -> ExportOut:
         / export_module.output_filename(clip.title or f"clip-{clip.rank}", payload.ratio)
     )
 
-    request = export_module.ExportRequest(
+    export_request = export_module.ExportRequest(
         source=Path(source.path),
         destination=destination,
         start_s=clip.start_s,
@@ -213,27 +221,58 @@ async def export_clip(clip_id: str, payload: ExportRequestIn) -> ExportOut:
         ratio=payload.ratio,
     )
 
-    try:
-        await asyncio.to_thread(
-            export_module.export_clip,
-            request,
-            work_dir=workspace.captions_dir,
-            settings=settings.export,
-        )
-    except export_module.ExportError as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
-
     record = Export(
         id=new_id(),
         clip_id=clip_id,
         path=str(destination),
         ratio=payload.ratio,
         style=style.key,
-        size_bytes=destination.stat().st_size,
+        size_bytes=0,
+        status="pending",
     )
     await asyncio.to_thread(store.create_export, record)
-    await asyncio.to_thread(store.update_clip, clip_id, status="exported")
 
+    background_tasks.add_task(
+        _run_export,
+        export_id=record.id,
+        clip_id=clip_id,
+        export_request=export_request,
+        work_dir=workspace.captions_dir,
+        export_settings=settings.export,
+    )
+
+    return ExportOut.of(record)
+
+
+def _run_export(
+    *,
+    export_id: str,
+    clip_id: str,
+    export_request: export_module.ExportRequest,
+    work_dir: Path,
+    export_settings,
+) -> None:
+    """Synchronous render worker called from a BackgroundTask."""
+    try:
+        export_module.export_clip(
+            export_request,
+            work_dir=work_dir,
+            settings=export_settings,
+        )
+        size = export_request.destination.stat().st_size
+        store.update_export_status(export_id, "done", size_bytes=size)
+        store.update_clip(clip_id, status="exported")
+    except Exception as exc:
+        log.error("Export %s failed: %s", export_id, exc)
+        store.update_export_status(export_id, "failed", error=str(exc))
+
+
+@router.get("/exports/{export_id}", response_model=ExportOut)
+async def get_export(export_id: str) -> ExportOut:
+    """Poll this to check render progress. ``status`` is pending → done/failed."""
+    record = await asyncio.to_thread(store.get_export, export_id)
+    if record is None:
+        raise HTTPException(status_code=404, detail="Export not found.")
     return ExportOut.of(record)
 
 
@@ -242,6 +281,11 @@ async def download_export(export_id: str) -> FileResponse:
     record = await asyncio.to_thread(store.get_export, export_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Export not found.")
+
+    if record.status == "pending":
+        raise HTTPException(status_code=425, detail="Export is still rendering. Poll /api/exports/{id} until status is 'done'.")
+    if record.status == "failed":
+        raise HTTPException(status_code=500, detail=f"Export failed: {record.error}")
 
     path = Path(record.path)
     if not path.exists():
