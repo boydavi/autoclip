@@ -35,6 +35,23 @@ DEDUPE_IOU = 0.4
 HOSTED_CONCURRENCY = 3
 LOCAL_CONCURRENCY = 1
 
+#: Rate-limit retry policy. On a rate-limit hit the window is retried up to
+#: MAX_RETRIES times with exponential backoff (30 s, 60 s, 120 s …).
+MAX_RETRIES = 3
+RETRY_BASE_DELAY_S = 30.0
+
+#: Substrings in an exception message that indicate a rate-limit response.
+_RATE_LIMIT_MARKERS = (
+    "rate limit", "ratelimit", "rate_limit",
+    "429", "too many requests", "quota exceeded",
+    "requests per minute", "rpm",
+)
+
+
+def _is_rate_limit(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(m in msg for m in _RATE_LIMIT_MARKERS)
+
 
 class HighlightError(RuntimeError):
     """Highlight detection produced nothing usable."""
@@ -127,16 +144,28 @@ async def detect(
     job_id: str,
     silences: list[Silence] | None = None,
     on_progress: Callable[[float], None] | None = None,
+    concurrency: int | None = None,
 ) -> list[Clip]:
-    """Run detection across the whole transcript and return ranked clips."""
+    """Run detection across the whole transcript and return ranked clips.
+
+    ``concurrency`` overrides the built-in default (3 for hosted, 1 for local).
+    Set it to 1 for free-tier keys that enforce a strict requests-per-minute
+    limit — running windows serially avoids the rate-limit cascade that would
+    otherwise kill a majority of windows and abort the job.
+    """
     windows = build_windows(transcript)
     if not windows:
         raise HighlightError("The transcript is empty, so there is nothing to clip.")
 
-    log.info("Detecting highlights across %d window(s) with %s.", len(windows), provider.name)
+    _concurrency = concurrency if concurrency is not None else (
+        LOCAL_CONCURRENCY if provider.name == "ollama" else HOSTED_CONCURRENCY
+    )
+    log.info(
+        "Detecting highlights across %d window(s) with %s (concurrency=%d).",
+        len(windows), provider.name, _concurrency,
+    )
 
-    concurrency = LOCAL_CONCURRENCY if provider.name == "ollama" else HOSTED_CONCURRENCY
-    semaphore = asyncio.Semaphore(concurrency)
+    semaphore = asyncio.Semaphore(_concurrency)
     completed = 0
     failed_windows = 0
     lock = asyncio.Lock()
@@ -145,18 +174,38 @@ async def detect(
         nonlocal completed, failed_windows
         async with semaphore:
             failed = False
-            try:
-                result = await provider.detect_highlights(window, config)
-                candidates = result.clips
-            except Exception as exc:
+            candidates: list[ClipCandidate] = []
+            last_exc: Exception | None = None
+
+            for attempt in range(MAX_RETRIES):
+                try:
+                    result = await provider.detect_highlights(window, config)
+                    candidates = result.clips
+                    last_exc = None
+                    break
+                except Exception as exc:
+                    if _is_rate_limit(exc) and attempt < MAX_RETRIES - 1:
+                        delay = RETRY_BASE_DELAY_S * (2 ** attempt)
+                        log.warning(
+                            "Window %d-%d hit rate limit (attempt %d/%d); "
+                            "retrying in %.0f s.",
+                            window.first_word, window.last_word,
+                            attempt + 1, MAX_RETRIES, delay,
+                        )
+                        await asyncio.sleep(delay)
+                        continue
+                    last_exc = exc
+                    break
+
+            if last_exc is not None:
                 log.warning(
                     "Window %d-%d failed (%s); continuing with the remaining windows.",
                     window.first_word,
                     window.last_word,
-                    exc,
+                    last_exc,
                 )
-                candidates = []
                 failed = True
+
             async with lock:
                 completed += 1
                 if failed:

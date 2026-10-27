@@ -51,6 +51,10 @@ class ProviderSettings(BaseModel):
     #: OpenRouter, Groq, DeepSeek, or a local LM Studio server is the supported
     #: way to use any other vendor.
     base_url: str | None = None
+    #: Max parallel LLM windows. None means use the built-in default (3 for
+    #: hosted providers, 1 for ollama). Set to 1 for rate-limited free-tier
+    #: keys (e.g. Groq free tier at ~1 RPM).
+    concurrency: int | None = None
 
 
 class WhisperSettings(BaseModel):

@@ -379,6 +379,7 @@ class PipelineRunner:
             job_id=self.job.id,
             silences=silences,
             on_progress=self._stage_progress(stage),
+            concurrency=self.settings.provider(provider_name).concurrency,
         )
 
         store.replace_clips(self.job.id, clips)
