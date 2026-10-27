@@ -246,6 +246,71 @@ def decimate(
     return deduped
 
 
+def adapt_crop_path(
+    path: CropPath,
+    *,
+    aspect_w: int,
+    aspect_h: int,
+) -> CropPath:
+    """Re-derive a CropPath for a different output ratio, reusing tracked centres.
+
+    The original path encodes where subjects are: each keyframe's top-left corner
+    plus the segment's crop dimensions give a subject centre point
+    (x + w/2, y + h/2). Recentring a window of the new ratio on those same
+    points preserves face-tracking framing without re-running detection.
+
+    ``fit`` segments are preserved as-is; their keyframes are unused by the
+    export stage.
+    """
+    new_segments: list[CropSegment] = []
+    for seg in path.segments:
+        new_w, new_h = target_crop_size(path.source_width, path.source_height, aspect_w, aspect_h)
+
+        if seg.fit or not seg.keyframes:
+            new_segments.append(
+                CropSegment(
+                    start_s=seg.start_s,
+                    end_s=seg.end_s,
+                    width=new_w,
+                    height=new_h,
+                    keyframes=list(seg.keyframes),
+                    strategy=seg.strategy,
+                    zoom=seg.zoom,
+                    fit=seg.fit,
+                )
+            )
+            continue
+
+        max_x = float(path.source_width - new_w)
+        max_y = float(path.source_height - new_h)
+        new_keyframes: list[CropKeyframe] = []
+        for kf in seg.keyframes:
+            cx = kf.x + seg.width / 2
+            cy = kf.y + seg.height / 2
+            nx = max(0.0, min(max_x, cx - new_w / 2))
+            ny = max(0.0, min(max_y, cy - new_h / 2))
+            new_keyframes.append(CropKeyframe(t=kf.t, x=nx, y=ny))
+
+        new_segments.append(
+            CropSegment(
+                start_s=seg.start_s,
+                end_s=seg.end_s,
+                width=new_w,
+                height=new_h,
+                keyframes=new_keyframes,
+                strategy=seg.strategy,
+                zoom=seg.zoom,
+                fit=seg.fit,
+            )
+        )
+
+    return CropPath(
+        source_width=path.source_width,
+        source_height=path.source_height,
+        segments=new_segments,
+    )
+
+
 # --------------------------------------------------------------------------
 # ffmpeg expressions
 # --------------------------------------------------------------------------

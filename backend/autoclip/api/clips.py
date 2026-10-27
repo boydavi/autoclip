@@ -15,7 +15,7 @@ from ..db import store
 from ..db.models import Export, new_id
 from ..pipeline import captions as captions_module
 from ..pipeline import export as export_module
-from ..pipeline.reframe.croppath import CropPath, centre_crop
+from ..pipeline.reframe.croppath import CropPath, adapt_crop_path, centre_crop
 from ..pipeline.runner import JobWorkspace
 from ..pipeline.transcript import Transcript, Word
 from .schemas import (
@@ -307,22 +307,27 @@ def _load_transcript(job_id: str) -> Transcript:
 
 
 def _crop_path_for(workspace: JobWorkspace, clip, source, ratio: str) -> CropPath:
-    """Reuse the job's cached crop path only when it matches the requested ratio.
+    """Return a crop path for the requested ratio, preserving face tracking.
 
-    The cached path was computed for the original job's export ratio. Reusing
-    it for a different ratio would apply wrong geometry, so fall back to a
-    centre crop when the ratios differ.
+    If the cached path already matches the ratio, return it directly. If a
+    cached path exists for a different ratio, adapt it — recentring tracked
+    windows on the same subject centres at the new aspect ratio so faces stay
+    in frame instead of getting a plain centre crop. Falls back to centre crop
+    only when no cached path exists (audio-only or pre-reframe jobs).
     """
     cached = workspace.crop_path(clip.id)
+    aspect = {"9:16": (9, 16), "1:1": (1, 1), "16:9": (16, 9)}[ratio]
+
     if cached.exists():
+        existing = CropPath.load(cached)
         job = store.get_job(clip.job_id)
         original_ratio = "9:16"
         if job and job.settings:
             original_ratio = (job.settings.get("export") or {}).get("ratio", "9:16")
         if original_ratio == ratio:
-            return CropPath.load(cached)
+            return existing
+        return adapt_crop_path(existing, aspect_w=aspect[0], aspect_h=aspect[1])
 
-    aspect = {"9:16": (9, 16), "1:1": (1, 1), "16:9": (16, 9)}[ratio]
     return centre_crop(
         source.width or 1920,
         source.height or 1080,
