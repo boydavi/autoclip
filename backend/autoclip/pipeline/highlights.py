@@ -138,16 +138,17 @@ async def detect(
     concurrency = LOCAL_CONCURRENCY if provider.name == "ollama" else HOSTED_CONCURRENCY
     semaphore = asyncio.Semaphore(concurrency)
     completed = 0
+    failed_windows = 0
     lock = asyncio.Lock()
 
     async def run_window(window: TranscriptWindow) -> list[ClipCandidate]:
-        nonlocal completed
+        nonlocal completed, failed_windows
         async with semaphore:
+            failed = False
             try:
                 result = await provider.detect_highlights(window, config)
                 candidates = result.clips
             except Exception as exc:
-                # One bad window shouldn't lose the whole video's other windows.
                 log.warning(
                     "Window %d-%d failed (%s); continuing with the remaining windows.",
                     window.first_word,
@@ -155,14 +156,28 @@ async def detect(
                     exc,
                 )
                 candidates = []
+                failed = True
             async with lock:
                 completed += 1
+                if failed:
+                    failed_windows += 1
                 if on_progress:
                     on_progress(completed / len(windows))
             return candidates
 
     results = await asyncio.gather(*(run_window(w) for w in windows))
     candidates = [c for group in results for c in group]
+
+    if failed_windows > 0:
+        log.warning("%d of %d LLM windows failed.", failed_windows, len(windows))
+        # Raise if a majority of windows failed — results would be too incomplete.
+        threshold = max(1, len(windows) // 2)
+        if failed_windows >= threshold:
+            raise HighlightError(
+                f"{failed_windows} of {len(windows)} LLM windows failed — results "
+                "would be too incomplete to be useful. "
+                "Check provider connectivity, API key, and try again."
+            )
 
     if not candidates:
         raise HighlightError(

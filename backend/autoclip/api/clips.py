@@ -307,14 +307,20 @@ def _load_transcript(job_id: str) -> Transcript:
 
 
 def _crop_path_for(workspace: JobWorkspace, clip, source, ratio: str) -> CropPath:
-    """Reuse the job's cached crop path, falling back to a centre crop.
+    """Reuse the job's cached crop path only when it matches the requested ratio.
 
-    A re-export at a different ratio can't reuse a path computed for the
-    original one, so the geometry is recomputed rather than stretched.
+    The cached path was computed for the original job's export ratio. Reusing
+    it for a different ratio would apply wrong geometry, so fall back to a
+    centre crop when the ratios differ.
     """
     cached = workspace.crop_path(clip.id)
-    if cached.exists() and ratio == "9:16":
-        return CropPath.load(cached)
+    if cached.exists():
+        job = store.get_job(clip.job_id)
+        original_ratio = "9:16"
+        if job and job.settings:
+            original_ratio = (job.settings.get("export") or {}).get("ratio", "9:16")
+        if original_ratio == ratio:
+            return CropPath.load(cached)
 
     aspect = {"9:16": (9, 16), "1:1": (1, 1), "16:9": (16, 9)}[ratio]
     return centre_crop(

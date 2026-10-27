@@ -75,6 +75,37 @@ def slugify(text: str, *, max_length: int = 60) -> str:
 # --------------------------------------------------------------------------
 
 
+def fetch_youtube_captions(url: str, target_dir: Path, settings: IngestSettings | None = None) -> bool:
+    """Download only YouTube's auto-captions (json3) beside an existing source.
+
+    Never raises: captions are an optimisation and Whisper remains the fallback.
+    """
+    if any(target_dir.glob("*.json3")):
+        return True
+    import yt_dlp
+
+    settings = settings or IngestSettings()
+    options: dict = {
+        "skip_download": True,
+        "writeautomaticsub": True,
+        "subtitleslangs": ["en.*"],
+        "subtitlesformat": "json3",
+        "outtmpl": str(target_dir / "source.%(ext)s"),
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+    }
+    if settings.cookies_from_browser:
+        options["cookiesfrombrowser"] = (settings.cookies_from_browser,)
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            ydl.extract_info(url, download=True)
+    except Exception as exc:
+        log.warning("Caption-only fetch failed for %s: %s", url, exc)
+        return False
+    return any(target_dir.glob("*.json3"))
+
+
 def ingest_youtube(
     url: str,
     settings: IngestSettings | None = None,
@@ -92,6 +123,14 @@ def ingest_youtube(
     source_id = new_id()
     target_dir = paths.source_media_dir(source_id)
     target_dir.mkdir(parents=True, exist_ok=True)
+
+    free_bytes = shutil.disk_usage(target_dir).free
+    if free_bytes < 1 * 1024 ** 3:
+        shutil.rmtree(target_dir, ignore_errors=True)
+        raise IngestError(
+            "Not enough disk space to download this video.",
+            hint=f"Only {free_bytes // (1024 ** 2)} MB free. Free up at least 1 GB and retry.",
+        )
 
     def hook(status: dict) -> None:
         if not on_progress or status.get("status") != "downloading":
@@ -241,6 +280,16 @@ def ingest_file(path: Path, *, move: bool = False, title: str | None = None) -> 
     target_dir = paths.source_media_dir(source_id)
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / f"source{suffix}"
+
+    file_size = path.stat().st_size
+    free_bytes = shutil.disk_usage(target_dir).free
+    if not move and free_bytes < file_size + 256 * 1024 * 1024:
+        shutil.rmtree(target_dir, ignore_errors=True)
+        raise IngestError(
+            f"Not enough disk space to store {path.name}.",
+            hint=f"Need {(file_size + 256 * 1024 * 1024) // (1024 ** 2)} MB free, "
+                 f"only {free_bytes // (1024 ** 2)} MB available.",
+        )
 
     try:
         if move:

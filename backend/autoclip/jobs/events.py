@@ -83,6 +83,28 @@ class EventBroker:
 
     # -- subscribing -------------------------------------------------------
 
+    @contextlib.asynccontextmanager
+    async def subscribe_ctx(self, job_id: str):
+        """Register a subscriber queue eagerly, before reading snapshot state.
+
+        Use this instead of ``subscribe`` when you need the subscription active
+        before you read the job's current state from the DB — otherwise events
+        that fire between the DB read and the first ``subscribe`` iteration are
+        silently lost.
+        """
+        queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=QUEUE_SIZE)
+        async with self._lock:
+            self._subscribers.setdefault(job_id, set()).add(queue)
+        try:
+            yield queue
+        finally:
+            async with self._lock:
+                subscribers = self._subscribers.get(job_id)
+                if subscribers is not None:
+                    subscribers.discard(queue)
+                    if not subscribers:
+                        self._subscribers.pop(job_id, None)
+
     async def subscribe(self, job_id: str) -> AsyncIterator[Event]:
         """Yield events for ``job_id`` until the client disconnects."""
         queue: asyncio.Queue[Event] = asyncio.Queue(maxsize=QUEUE_SIZE)

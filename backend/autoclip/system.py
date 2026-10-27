@@ -84,6 +84,8 @@ class FFmpegInfo:
     nvenc_works: bool = False
     #: Why nvenc is unusable, when it is listed but doesn't work.
     nvenc_error: str = ""
+    #: h264_qsv (Intel Quick Sync) actually encodes on this machine.
+    qsv_works: bool = False
     filters: set[str] = field(default_factory=set)
     ffprobe_found: bool = False
 
@@ -208,6 +210,8 @@ def probe_ffmpeg() -> FFmpegInfo:
     info.has_nvenc = "h264_nvenc" in encoders
     if info.has_nvenc:
         info.nvenc_works, info.nvenc_error = _probe_nvenc(exe)
+    if "h264_qsv" in encoders:
+        info.qsv_works = _probe_qsv(exe)
 
     filters = _run([exe, "-hide_banner", "-filters"])
     # Filter listing rows look like: " ... crop   V->V   Crop the input video."
@@ -252,6 +256,19 @@ def _probe_nvenc(exe: str) -> tuple[bool, str]:
                 return False, line.strip()
         return False, "NVENC initialisation failed."
     return True, ""
+
+
+def _probe_qsv(exe: str) -> bool:
+    """Try a few-frame Intel Quick Sync encode to null; listed is not the same as usable."""
+    proc_output = _run(
+        [
+            exe, "-hide_banner", "-nostdin", "-f", "lavfi",
+            "-i", "color=c=black:s=256x256:d=0.2",
+            "-c:v", "h264_qsv", "-frames:v", "3", "-f", "null", "-",
+        ]
+    )
+    lowered = proc_output.lower()
+    return not ("error" in lowered or "failed" in lowered or "not support" in lowered)
 
 
 def probe_gpu() -> GPUInfo:

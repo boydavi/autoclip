@@ -40,8 +40,8 @@ STAGE_WEIGHTS: dict[Stage, float] = {
     Stage.TRANSCRIBE: 0.35,
     Stage.HIGHLIGHTS: 0.15,
     Stage.REFRAME: 0.20,
-    Stage.CAPTIONS: 0.02,
-    Stage.EXPORT: 0.23,
+    Stage.CAPTIONS: 0.00,
+    Stage.EXPORT: 0.25,
 }
 
 
@@ -101,6 +101,17 @@ class JobWorkspace:
         return self.root / "captions"
 
 
+def _job_settings(job: Job) -> Settings:
+    """The settings snapshot taken when the job was created (with its per-job
+    overrides), falling back to the saved global settings for old jobs."""
+    if job.settings:
+        try:
+            return Settings.model_validate(job.settings)
+        except Exception as exc:
+            log.warning("Job %s settings snapshot unusable (%s); using saved settings.", job.id, exc)
+    return load_settings()
+
+
 class PipelineRunner:
     """Executes one job."""
 
@@ -115,7 +126,7 @@ class PipelineRunner:
     ) -> None:
         self.job = job
         self.source = source
-        self.settings = settings or load_settings()
+        self.settings = settings or _job_settings(job)
         self.on_progress = on_progress
         self._is_cancelled = is_cancelled or (lambda: False)
         self.workspace = JobWorkspace(job.id)
@@ -177,9 +188,12 @@ class PipelineRunner:
             transcript = self._stage_transcribe(audio)
             silences = self._load_or_detect_silences(audio)
             clips = await self._stage_highlights(transcript, silences)
-            crop_paths = self._stage_reframe(clips, transcript)
-            self._stage_captions(clips, transcript)
-            self._stage_export(clips, transcript, crop_paths)
+            if self.settings.export.scan_only:
+                log.info("Job %s is scan-only: %d clips found, skipping reframe/export.", self.job.id, len(clips))
+            else:
+                crop_paths = self._stage_reframe(clips, transcript)
+                self._stage_captions(clips, transcript)
+                self._stage_export(clips, transcript, crop_paths)
         except JobCancelled:
             store.update_job(self.job.id, status="cancelled", finished_at=utcnow(), progress=0.0)
             raise
@@ -189,7 +203,23 @@ class PipelineRunner:
             raise
 
         store.update_job(self.job.id, status="done", progress=1.0, finished_at=utcnow())
+        self._cleanup_workspace()
         return clips
+
+    def _cleanup_workspace(self) -> None:
+        """Remove the extracted audio after a successful job to free disk space.
+
+        The audio can be re-extracted from the source on retry; all other
+        checkpoint files (transcript, silences, crops) are kept so retries
+        skip completed stages.
+        """
+        audio = self.workspace.audio
+        if audio.exists():
+            try:
+                audio.unlink()
+                log.info("Removed workspace audio for job %s.", self.job.id)
+            except OSError as exc:
+                log.warning("Could not remove workspace audio for job %s: %s", self.job.id, exc)
 
     # -- stages ------------------------------------------------------------
 
@@ -197,6 +227,12 @@ class PipelineRunner:
         stage = Stage.PREPARE
         self._check_cancelled()
         source_path = Path(self.source.path)
+
+        if not self.workspace.audio.exists() and not source_path.exists():
+            raise PipelineError(
+                f"Source file is missing: {source_path.name}. It may have been moved or deleted.",
+                stage=stage,
+            )
 
         if self.workspace.audio.exists() and self.workspace.audio.stat().st_size > 0:
             log.info("Reusing existing audio for job %s.", self.job.id)
@@ -219,12 +255,49 @@ class PipelineRunner:
         stage = Stage.TRANSCRIBE
         self._check_cancelled()
 
+        # Checkpoint 1: job-level transcript file already written (e.g. job retry).
         if self.workspace.transcript.exists():
             log.info("Reusing existing transcript for job %s.", self.job.id)
             transcript = Transcript.load(self.workspace.transcript)
             self._finish_stage(stage)
             return transcript
 
+        # Checkpoint 2: transcript from an earlier job on the same source.
+        cached_row = store.get_transcript_for_source(self.source.id)
+        if cached_row is not None:
+            cached_path = Path(cached_row.json_path)
+            if cached_path.exists():
+                log.info(
+                    "Reusing cross-job transcript for source %s (job %s).",
+                    self.source.id,
+                    cached_row.job_id,
+                )
+                transcript = Transcript.load(cached_path)
+                transcript.save(self.workspace.transcript)
+                self._finish_stage(stage)
+                return transcript
+
+        # Checkpoint 3: YouTube auto-captions downloaded alongside the video.
+        caption_transcript = self._try_youtube_captions()
+        if caption_transcript is not None:
+            self._emit(stage, 0.5, "Using YouTube captions")
+            caption_transcript.save(self.workspace.transcript)
+            store.upsert_transcript(
+                TranscriptRow(
+                    job_id=self.job.id,
+                    source_id=self.source.id,
+                    json_path=str(self.workspace.transcript),
+                    language=caption_transcript.language,
+                    model=caption_transcript.model,
+                    has_diarization=False,
+                    word_count=len(caption_transcript.words),
+                    source=caption_transcript.source,
+                )
+            )
+            self._finish_stage(stage)
+            return caption_transcript
+
+        # Fallback: run Whisper.
         self._emit(stage, 0.0, "Transcribing")
         transcript = transcribe.transcribe(
             audio,
@@ -244,6 +317,7 @@ class PipelineRunner:
         store.upsert_transcript(
             TranscriptRow(
                 job_id=self.job.id,
+                source_id=self.source.id,
                 json_path=str(self.workspace.transcript),
                 language=transcript.language,
                 model=transcript.model,
@@ -255,6 +329,19 @@ class PipelineRunner:
 
         self._finish_stage(stage)
         return transcript
+
+    def _try_youtube_captions(self) -> Transcript | None:
+        """Look for a yt-dlp-downloaded .json3 caption file next to the source video."""
+        # The media folder is named by ingest's own id, which differs from the
+        # record id when ingest ran asynchronously - so look beside the file.
+        dirs = {Path(self.source.path).parent} if self.source.path else set()
+        dirs.add(paths.source_media_dir(self.source.id))
+        caption_files = sorted(f for d in dirs if d.is_dir() for f in d.glob("*.json3"))
+        if not caption_files:
+            return None
+        caption_path = caption_files[0]
+        log.info("Found YouTube captions: %s — trying caption-first path.", caption_path.name)
+        return transcribe.parse_youtube_captions(caption_path)
 
     def _load_or_detect_silences(self, audio: Path) -> list[Silence]:
         if self.workspace.silences.exists():
@@ -422,30 +509,3 @@ class PipelineRunner:
         )
 
 
-async def run_job(
-    job_id: str,
-    *,
-    settings: Settings | None = None,
-    on_progress: ProgressHandler | None = None,
-    is_cancelled: Callable[[], bool] | None = None,
-) -> list[Clip]:
-    """Load a job and run it to completion."""
-    job = store.get_job(job_id)
-    if job is None:
-        raise PipelineError(f"Job {job_id} not found.", stage=Stage.PREPARE)
-
-    source = store.get_source(job.source_id)
-    if source is None:
-        raise PipelineError(f"Source {job.source_id} not found.", stage=Stage.PREPARE)
-
-    runner = PipelineRunner(
-        job, source, settings=settings, on_progress=on_progress, is_cancelled=is_cancelled
-    )
-    # The pipeline is mostly blocking work (ffmpeg, Whisper, MediaPipe) with one
-    # async stage. Running it in a worker thread keeps the web server's event
-    # loop responsive while a job is going.
-    return await asyncio.get_running_loop().run_in_executor(None, _run_sync, runner)
-
-
-def _run_sync(runner: PipelineRunner) -> list[Clip]:
-    return asyncio.run(runner.run())

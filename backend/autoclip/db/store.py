@@ -8,6 +8,7 @@ wrap them in ``asyncio.to_thread``.
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from typing import Any
 
 from . import connection
@@ -34,8 +35,8 @@ def create_source(source: Source) -> Source:
             """
             INSERT INTO sources (id, type, url, filename, path, title, channel,
                                  duration_s, width, height, fps, has_audio,
-                                 has_video, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                 has_video, created_at, ingest_status, ingest_error)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 source.id,
@@ -52,15 +53,62 @@ def create_source(source: Source) -> Source:
                 int(source.has_audio),
                 int(source.has_video),
                 source.created_at,
+                source.ingest_status,
+                source.ingest_error,
             ),
         )
     return source
+
+
+def update_source_after_ingest(
+    source_id: str,
+    *,
+    ingest_status: str,
+    ingest_error: str | None = None,
+    source: Source | None = None,
+) -> None:
+    """Update source record after background ingest completes or fails."""
+    fields: dict = {"ingest_status": ingest_status, "ingest_error": ingest_error}
+    if source is not None and ingest_status == "ready":
+        fields.update(
+            path=source.path,
+            title=source.title,
+            filename=source.filename,
+            channel=source.channel,
+            duration_s=source.duration_s,
+            width=source.width,
+            height=source.height,
+            fps=source.fps,
+            has_audio=int(source.has_audio),
+            has_video=int(source.has_video),
+        )
+    assignments = ", ".join(f"{name} = ?" for name in fields)
+    with connection() as conn:
+        conn.execute(
+            f"UPDATE sources SET {assignments} WHERE id = ?",
+            (*fields.values(), source_id),
+        )
 
 
 def get_source(source_id: str) -> Source | None:
     with connection() as conn:
         row = conn.execute("SELECT * FROM sources WHERE id = ?", (source_id,)).fetchone()
     return Source.from_row(row) if row else None
+
+
+def find_ready_source_by_url(url: str) -> Source | None:
+    """Newest successfully ingested source for ``url`` whose media file still exists."""
+    with connection() as conn:
+        rows = conn.execute(
+            "SELECT * FROM sources WHERE url = ? AND ingest_status = 'ready' AND path != '' "
+            "ORDER BY created_at DESC",
+            (url,),
+        ).fetchall()
+    for row in rows:
+        source = Source.from_row(row)
+        if Path(source.path).is_file():
+            return source
+    return None
 
 
 def list_sources(limit: int = 50) -> list[Source]:
@@ -198,15 +246,17 @@ def upsert_transcript(transcript: Transcript) -> Transcript:
         conn.execute(
             """
             INSERT INTO transcripts (job_id, json_path, language, model,
-                                     has_diarization, word_count, source, created_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                                     has_diarization, word_count, source, created_at,
+                                     source_id)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(job_id) DO UPDATE SET
                 json_path = excluded.json_path,
                 language = excluded.language,
                 model = excluded.model,
                 has_diarization = excluded.has_diarization,
                 word_count = excluded.word_count,
-                source = excluded.source
+                source = excluded.source,
+                source_id = excluded.source_id
             """,
             (
                 transcript.job_id,
@@ -217,6 +267,7 @@ def upsert_transcript(transcript: Transcript) -> Transcript:
                 transcript.word_count,
                 transcript.source,
                 transcript.created_at,
+                transcript.source_id,
             ),
         )
     return transcript
@@ -225,6 +276,16 @@ def upsert_transcript(transcript: Transcript) -> Transcript:
 def get_transcript(job_id: str) -> Transcript | None:
     with connection() as conn:
         row = conn.execute("SELECT * FROM transcripts WHERE job_id = ?", (job_id,)).fetchone()
+    return Transcript.from_row(row) if row else None
+
+
+def get_transcript_for_source(source_id: str) -> Transcript | None:
+    """Return the most recent transcript for a source, enabling cross-job caching."""
+    with connection() as conn:
+        row = conn.execute(
+            "SELECT * FROM transcripts WHERE source_id = ? ORDER BY created_at DESC LIMIT 1",
+            (source_id,),
+        ).fetchone()
     return Transcript.from_row(row) if row else None
 
 

@@ -354,6 +354,7 @@ let activeJobId = null; // which job is shown in detail
 let sseSource = null;   // current EventSource
 let sseJobId = null;    // job the EventSource is attached to
 let allClipsCount = 0;
+let countedJobIds = new Set();
 let pollTimer = null;
 
 // ── Server health ──────────────────────────────────────────────────────────
@@ -662,8 +663,11 @@ async function renderDoneView(job) {
   let clips = [];
   try { clips = await api('GET', `/api/jobs/${job.id}/clips`); } catch(e) { toast('Could not load clips: ' + e.message, 'err'); }
 
-  allClipsCount += clips.length;
-  updateStats();
+  if (!countedJobIds.has(job.id)) {
+    allClipsCount += clips.length;
+    countedJobIds.add(job.id);
+    updateStats();
+  }
 
   document.getElementById('job-detail').innerHTML = `
     <div class="gallery-section">

@@ -45,9 +45,12 @@ class Source:
     has_audio: bool = True
     has_video: bool = True
     created_at: str = field(default_factory=utcnow)
+    ingest_status: str = "ready"
+    ingest_error: str | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Source:
+        keys = row.keys() if hasattr(row, "keys") else []
         return cls(
             id=row["id"],
             type=row["type"],
@@ -63,6 +66,8 @@ class Source:
             has_audio=bool(row["has_audio"]),
             has_video=bool(row["has_video"]),
             created_at=row["created_at"],
+            ingest_status=row["ingest_status"] if "ingest_status" in keys else "ready",
+            ingest_error=row["ingest_error"] if "ingest_error" in keys else None,
         )
 
 
@@ -110,9 +115,12 @@ class Transcript:
     #: "whisper" or "youtube" — which path produced this transcript.
     source: str = "whisper"
     created_at: str = field(default_factory=utcnow)
+    #: Source the transcript belongs to — enables cross-job caching.
+    source_id: str | None = None
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Transcript:
+        keys = row.keys() if hasattr(row, "keys") else []
         return cls(
             job_id=row["job_id"],
             json_path=row["json_path"],
@@ -122,6 +130,7 @@ class Transcript:
             word_count=row["word_count"],
             source=row["source"],
             created_at=row["created_at"],
+            source_id=row["source_id"] if "source_id" in keys else None,
         )
 
 

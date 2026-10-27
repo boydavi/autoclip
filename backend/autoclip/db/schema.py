@@ -104,9 +104,21 @@ def _migration_v1(conn: sqlite3.Connection) -> None:
     conn.executescript(_V1)
 
 
+_V2 = """
+ALTER TABLE sources ADD COLUMN ingest_status TEXT NOT NULL DEFAULT 'ready';
+ALTER TABLE sources ADD COLUMN ingest_error TEXT;
+ALTER TABLE transcripts ADD COLUMN source_id TEXT;
+CREATE INDEX idx_transcripts_source ON transcripts(source_id);
+"""
+
+
+def _migration_v2(conn: sqlite3.Connection) -> None:
+    conn.executescript(_V2)
+
+
 #: Ordered migrations. Index + 1 is the resulting ``user_version``.
 #: Append only — never edit a migration that has shipped.
-MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migration_v1]
+MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [_migration_v1, _migration_v2]
 
 SCHEMA_VERSION = len(MIGRATIONS)
 

@@ -29,6 +29,9 @@ class SourceOut(BaseModel):
     has_audio: bool
     has_video: bool
     created_at: str
+    #: "pending" during async ingest, "ready" when download is done, "failed" on error.
+    ingest_status: str = "ready"
+    ingest_error: str | None = None
 
     @classmethod
     def of(cls, source: models.Source) -> SourceOut:
@@ -48,6 +51,8 @@ class SourceOut(BaseModel):
             has_audio=source.has_audio,
             has_video=source.has_video,
             created_at=source.created_at,
+            ingest_status=source.ingest_status,
+            ingest_error=source.ingest_error,
         )
 
 
@@ -68,6 +73,9 @@ class JobSettingsIn(BaseModel):
     max_clips: int | None = Field(default=None, ge=1, le=50)
     caption_style: str | None = None
     ratio: Literal["9:16", "1:1", "16:9"] | None = None
+    crf: int | None = Field(default=None, ge=1, le=51)
+    preset: str | None = None
+    scan_only: bool | None = None
 
 
 class JobCreateIn(BaseModel):

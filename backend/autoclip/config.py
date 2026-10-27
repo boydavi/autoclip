@@ -37,7 +37,7 @@ LEGACY_KEYRING_SERVICE = "clipforge"
 ProviderName = Literal["anthropic", "openai", "gemini", "ollama"]
 
 #: Providers that authenticate with an API key. Ollama runs locally and needs none.
-KEYED_PROVIDERS: tuple[str, ...] = ("anthropic", "openai", "gemini")
+KEYED_PROVIDERS: tuple[str, ...] = ("anthropic", "openai", "gemini", "groq")
 
 #: Extra secrets that aren't tied to a provider.
 HF_TOKEN_KEY = "huggingface_token"
@@ -54,8 +54,13 @@ class ProviderSettings(BaseModel):
 
 
 class WhisperSettings(BaseModel):
-    #: tiny | base | small | medium | large-v3 — or a local path.
+    #: "local" uses faster-whisper on device; "groq" sends audio to Groq's API.
+    provider: Literal["local", "groq"] = "local"
+    #: tiny | base | small | medium | large-v3 — or a local path (local only).
     model: str = "small"
+    #: Groq model name. whisper-large-v3-turbo is fastest; whisper-large-v3 is
+    #: most accurate. Only used when provider="groq".
+    groq_model: str = "whisper-large-v3-turbo"
     #: Force a CTranslate2 compute type. Empty means "let hardware detection pick".
     compute_type: str = ""
     #: ISO 639-1 code, or empty for auto-detection.
@@ -90,8 +95,12 @@ class ExportSettings(BaseModel):
     #: Use h264_nvenc when the hardware supports it. Falls back to libx264.
     prefer_hardware_encoder: bool = True
     crf: int = 18
+    #: libx264 preset: ultrafast | superfast | veryfast | faster | fast | medium | slow | veryslow
+    preset: str = "medium"
     #: Also write a .srt sidecar next to each exported clip.
     write_srt: bool = False
+    #: Stop after highlight detection: clips get timestamps but no reframe/render.
+    scan_only: bool = False
 
 
 class Settings(BaseModel):

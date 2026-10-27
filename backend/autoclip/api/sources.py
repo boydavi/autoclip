@@ -8,10 +8,12 @@ import shutil
 import tempfile
 from pathlib import Path
 
-from fastapi import APIRouter, File, HTTPException, UploadFile
+from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
+from fastapi.responses import JSONResponse
 
 from ..config import load as load_settings
 from ..db import store
+from ..db.models import Source, new_id, utcnow
 from ..pipeline import ingest
 from .schemas import SourceOut, YouTubeIngestIn
 
@@ -38,9 +40,17 @@ async def get_source(source_id: str) -> SourceOut:
     return SourceOut.of(source)
 
 
-@router.post("/youtube", response_model=SourceOut, status_code=201)
-async def ingest_youtube(payload: YouTubeIngestIn) -> SourceOut:
-    """Download a YouTube video and register it as a source."""
+@router.post("/youtube", status_code=202)
+async def ingest_youtube(
+    payload: YouTubeIngestIn,
+    background_tasks: BackgroundTasks,
+) -> JSONResponse:
+    """Start a YouTube download in the background and return immediately.
+
+    Returns 202 with ``{"id": source_id, "ingest_status": "pending"}``.
+    Poll ``GET /api/sources/{id}`` until ``ingest_status`` is ``"ready"``
+    (or ``"failed"``).
+    """
     if not ingest.is_youtube_url(payload.url):
         raise HTTPException(status_code=400, detail="That is not a YouTube URL.")
 
@@ -50,17 +60,73 @@ async def ingest_youtube(payload: YouTubeIngestIn) -> SourceOut:
             update={"cookies_from_browser": payload.cookies_from_browser}
         )
 
-    try:
-        source = await asyncio.to_thread(ingest.ingest_youtube, payload.url, settings)
-    except ingest.IngestError as exc:
-        # 422 rather than 500: the request was well-formed, but the content
-        # can't be fetched, and the hint tells the user what to change.
-        raise HTTPException(
-            status_code=422, detail={"message": str(exc), "hint": exc.hint}
-        ) from exc
+    # Re-scanning a video is the common case: reuse the download (and with it the
+    # source-keyed transcript cache) instead of fetching gigabytes again.
+    existing = await asyncio.to_thread(store.find_ready_source_by_url, payload.url)
+    if existing is not None:
+        if settings.prefer_youtube_captions:
+            await asyncio.to_thread(
+                ingest.fetch_youtube_captions, payload.url, Path(existing.path).parent, settings
+            )
+        log.info("Reusing source %s for %s.", existing.id, payload.url)
+        return JSONResponse(status_code=201, content=SourceOut.of(existing).model_dump(mode="json"))
 
-    await asyncio.to_thread(store.create_source, source)
-    return SourceOut.of(source)
+    source_id = new_id()
+    pending = Source(
+        id=source_id,
+        type="youtube",
+        url=payload.url,
+        path="",
+        title="",
+        created_at=utcnow(),
+        ingest_status="pending",
+    )
+    await asyncio.to_thread(store.create_source, pending)
+
+    background_tasks.add_task(_do_ingest_youtube, source_id, payload.url, settings)
+    return JSONResponse(
+        status_code=202,
+        content={"id": source_id, "ingest_status": "pending"},
+    )
+
+
+async def _do_ingest_youtube(source_id: str, url: str, settings) -> None:
+    """Background task: download the video and update the source record."""
+    try:
+        source = await asyncio.to_thread(ingest.ingest_youtube, url, settings)
+        # Carry over the pre-assigned id so the DB record stays consistent.
+        source = Source(
+            id=source_id,
+            type=source.type,
+            url=source.url,
+            path=source.path,
+            filename=source.filename,
+            title=source.title,
+            channel=source.channel,
+            duration_s=source.duration_s,
+            width=source.width,
+            height=source.height,
+            fps=source.fps,
+            has_audio=source.has_audio,
+            has_video=source.has_video,
+            created_at=source.created_at,
+            ingest_status="ready",
+        )
+        await asyncio.to_thread(
+            store.update_source_after_ingest,
+            source_id,
+            ingest_status="ready",
+            source=source,
+        )
+        log.info("Async ingest complete for source %s (%s).", source_id, source.title)
+    except Exception as exc:
+        log.error("Async ingest failed for source %s: %s", source_id, exc)
+        await asyncio.to_thread(
+            store.update_source_after_ingest,
+            source_id,
+            ingest_status="failed",
+            ingest_error=str(exc),
+        )
 
 
 @router.post("/upload", response_model=SourceOut, status_code=201)

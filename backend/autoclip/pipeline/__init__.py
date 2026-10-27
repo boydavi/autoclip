@@ -29,7 +29,7 @@ class Stage(StrEnum):
             Stage.TRANSCRIBE: "Transcribing",
             Stage.HIGHLIGHTS: "Finding highlights",
             Stage.REFRAME: "Reframing to vertical",
-            Stage.CAPTIONS: "Generating captions",
+            Stage.CAPTIONS: "Validating export settings",
             Stage.EXPORT: "Exporting clips",
         }[self]
 

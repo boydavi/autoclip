@@ -53,20 +53,27 @@ class GeminiProvider(LLMProvider):
             max_output_tokens=8192,
         )
 
-        try:
-            # The SDK's async surface has moved between releases; running the
-            # sync call in a thread works across all of them and keeps the event
-            # loop free.
-            response = await asyncio.to_thread(
-                client.models.generate_content,
-                model=self.model,
-                contents=user,
-                config=request_config,
-            )
-        except Exception as exc:
-            raise _translate(exc, self.name, self.model) from exc
-
-        return getattr(response, "text", "") or ""
+        for attempt in range(TRANSIENT_ATTEMPTS):
+            try:
+                # The SDK's async surface has moved between releases; running the
+                # sync call in a thread works across all of them and keeps the event
+                # loop free.
+                response = await asyncio.to_thread(
+                    client.models.generate_content,
+                    model=self.model,
+                    contents=user,
+                    config=request_config,
+                )
+            except Exception as exc:
+                if attempt + 1 < TRANSIENT_ATTEMPTS and _is_transient(exc):
+                    wait = TRANSIENT_BACKOFF_S * (2**attempt)
+                    log.warning("Gemini transient error (%s); retry %d in %.0fs.",
+                                str(exc)[:80], attempt + 1, wait)
+                    await asyncio.sleep(wait)
+                    continue
+                raise _translate(exc, self.name, self.model) from exc
+            return getattr(response, "text", "") or ""
+        raise AssertionError("unreachable")
 
     async def health_check(self) -> ProviderStatus:
         if not self.api_key:
@@ -84,6 +91,21 @@ class GeminiProvider(LLMProvider):
         return ProviderStatus(
             name=self.name, available=True, detail=self.model, models=names or SUGGESTED_MODELS
         )
+
+
+#: Rate limits and overload are routine on hosted Flash models; one hiccup must
+#: not cost a whole transcript window.
+TRANSIENT_ATTEMPTS = 5
+TRANSIENT_BACKOFF_S = 5.0
+_TRANSIENT_MARKERS = ("429", "503", "500", "unavailable", "resource_exhausted", "overloaded",
+                      "deadline", "timed out", "timeout", "connection reset", "internal")
+
+
+def _is_transient(exc: Exception) -> bool:
+    lowered = str(exc).lower()
+    if "api key" in lowered or "401" in lowered or "403" in lowered or "404" in lowered:
+        return False
+    return any(marker in lowered for marker in _TRANSIENT_MARKERS)
 
 
 def _translate(exc: Exception, provider: str, model: str) -> ProviderError:

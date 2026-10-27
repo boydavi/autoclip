@@ -179,6 +179,26 @@ def build_audio_filtergraph(settings: ExportSettings) -> str:
     return f"loudnorm=I={settings.loudness_lufs}:TP={LOUDNESS_TRUE_PEAK}:LRA={LOUDNESS_RANGE}"
 
 
+#: libx264 presets that Quick Sync lacks map to its fastest one.
+_QSV_PRESETS = {"veryfast", "faster", "fast", "medium", "slow", "slower", "veryslow"}
+
+
+def qsv_args(quality: int, preset: str = "medium") -> list[str]:
+    """Intel Quick Sync H.264. ``-global_quality`` (ICQ) plays the role of CRF;
+    QSV wants nv12 input, so the pixel format is set here rather than yuv420p."""
+    return [
+        "-c:v", "h264_qsv",
+        "-preset", preset if preset in _QSV_PRESETS else "veryfast",
+        "-global_quality", str(quality),
+        "-profile:v", "high",
+        "-pix_fmt", "nv12",
+    ]
+
+
+def _with_pix_fmt(args: list[str]) -> list[str]:
+    return args if "-pix_fmt" in args else [*args, "-pix_fmt", "yuv420p"]
+
+
 def encoder_args(settings: ExportSettings) -> list[str]:
     """Pick the video encoder and its quality settings.
 
@@ -201,11 +221,13 @@ def encoder_args(settings: ExportSettings) -> list[str]:
             "-profile:v",
             "high",
         ]
+    if settings.prefer_hardware_encoder and getattr(report().ffmpeg, "qsv_works", False):
+        return qsv_args(settings.crf, settings.preset)
     return [
         "-c:v",
         "libx264",
         "-preset",
-        "medium",
+        settings.preset,
         "-crf",
         str(settings.crf),
         "-profile:v",
@@ -282,9 +304,7 @@ def export_clip(
         "0:a?",
         "-af",
         build_audio_filtergraph(settings),
-        *encoder_args(settings),
-        "-pix_fmt",
-        "yuv420p",
+        *_with_pix_fmt(encoder_args(settings)),
         "-c:a",
         "aac",
         "-b:a",

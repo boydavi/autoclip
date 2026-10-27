@@ -11,7 +11,7 @@ from sse_starlette.sse import EventSourceResponse
 from ..config import load as load_settings
 from ..db import store
 from ..db.models import Job, new_id
-from ..jobs.events import broker
+from ..jobs.events import HEARTBEAT_S, broker
 from ..jobs.queue import queue
 from .schemas import JobCreateIn, JobOut, JobSettingsIn
 
@@ -42,6 +42,12 @@ def _apply_overrides(settings, overrides: JobSettingsIn):
         merged.export.caption_style = overrides.caption_style
     if overrides.ratio:
         merged.export.ratio = overrides.ratio
+    if overrides.crf is not None:
+        merged.export.crf = overrides.crf
+    if overrides.preset:
+        merged.export.preset = overrides.preset
+    if overrides.scan_only is not None:
+        merged.export.scan_only = overrides.scan_only
 
     return merged
 
@@ -97,21 +103,30 @@ async def job_events(job_id: str, request: Request) -> EventSourceResponse:
         raise HTTPException(status_code=404, detail="Job not found.")
 
     async def stream():
-        # Send the current state immediately: a client connecting mid-job (or
-        # reconnecting) must not wait for the next progress tick to render.
-        current = await asyncio.to_thread(store.get_job, job_id)
-        if current is not None:
-            yield {
-                "event": "snapshot",
-                "data": JobOut.of(current).model_dump_json(),
-            }
-            if current.status in ("done", "failed", "cancelled"):
-                return
+        # Subscribe before reading state so no events are missed between the
+        # DB read and the first iteration — a job that completes in that window
+        # would otherwise never deliver its "done" event to this subscriber.
+        async with broker.subscribe_ctx(job_id) as sub:
+            current = await asyncio.to_thread(store.get_job, job_id)
+            if current is not None:
+                yield {
+                    "event": "snapshot",
+                    "data": JobOut.of(current).model_dump_json(),
+                }
+                if current.status in ("done", "failed", "cancelled"):
+                    return
 
-        async for event in broker.subscribe(job_id):
-            if await request.is_disconnected():
-                break
-            yield {"event": event.type, "data": event.to_sse().split("data: ", 1)[-1].strip()}
+            while True:
+                try:
+                    event = await asyncio.wait_for(sub.get(), timeout=HEARTBEAT_S)
+                except TimeoutError:
+                    yield {"event": "heartbeat", "data": "{}"}
+                    continue
+                if await request.is_disconnected():
+                    break
+                yield {"event": event.type, "data": event.to_sse().split("data: ", 1)[-1].strip()}
+                if event.type in ("done", "failed", "cancelled"):
+                    return
 
     return EventSourceResponse(stream())
 
