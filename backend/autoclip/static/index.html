@@ -626,12 +626,13 @@ function renderRunningView(job) {
 // ── Render: Done job (clips gallery) ──────────────────────────────────────
 
 function clipCardHtml(c, i) {
-  i = i || 0; // index passed from map
+  i = i || 0;
   const dur  = fmtDur(c.duration_s);
   const pct  = Math.min(100, c.score);
   const high = c.score >= 85;
   const t    = fmtTime(c.start_s) + ' – ' + fmtTime(c.end_s);
   const exportHref = c.exports && c.exports.length > 0 ? c.exports[0].download_url : null;
+  // data-clip-idx / data-clip-id used by addEventListener below — no inline handlers with server data
   return `<div class="clip-card">
     <div class="clip-thumb">
       <canvas class="thumb-canvas" id="clip-canvas-${i}" width="180" height="320"></canvas>
@@ -648,8 +649,8 @@ function clipCardHtml(c, i) {
     <div class="clip-actions">
       ${exportHref
         ? `<a class="clip-btn primary" href="${exportHref}" target="_blank">Download</a>`
-        : `<button class="clip-btn primary" onclick="exportClip('${c.id}', this)">Export</button>`}
-      <button class="clip-btn" onclick="copyClipTitle('${esc(c.title)}')">Copy title</button>
+        : `<button class="clip-btn primary" data-export-id="${esc(c.id)}">Export</button>`}
+      <button class="clip-btn" data-clip-idx="${i}">Copy title</button>
     </div>
   </div>`;
 }
@@ -674,6 +675,14 @@ async function renderDoneView(job) {
         ? '<div class="idle-state"><div class="idle-icon">🔍</div><div class="idle-title">No clips found</div><div class="idle-sub">The highlight detector found no clips above the score threshold. Try adjusting min/max duration or use a longer video.</div></div>'
         : `<div class="clips-grid">${clips.map((c, i) => clipCardHtml(c, i)).join('')}</div>`}
     </div>`;
+
+  // Attach listeners after innerHTML — avoids any inline-handler XSS via server data
+  document.querySelectorAll('[data-clip-idx]').forEach(btn => {
+    btn.addEventListener('click', () => copyClipTitle(clips[+btn.dataset.clipIdx].title));
+  });
+  document.querySelectorAll('[data-export-id]').forEach(btn => {
+    btn.addEventListener('click', function() { exportClip(btn.dataset.exportId, btn); });
+  });
 
   clips.forEach((_, i) => {
     const canvas = document.getElementById('clip-canvas-' + i);
