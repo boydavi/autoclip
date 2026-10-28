@@ -30,6 +30,10 @@ OVERLAP_S = 60
 #: Two candidates covering this much of the same words are the same clip.
 DEDUPE_IOU = 0.4
 
+#: Minimum gap between the start times of any two kept clips (seconds).
+#: Prevents the final selection from clustering in one hot stretch of a long video.
+MIN_CLIP_GAP_S = 120.0
+
 #: Hosted providers tolerate parallel windows; a local model is already
 #: saturating the GPU, so extra concurrency only adds contention.
 HOSTED_CONCURRENCY = 3
@@ -290,7 +294,7 @@ def build_clips(
     # Refinement can move edges enough that two survivors now overlap.
     clips = _dedupe_clips(clips)
     clips.sort(key=lambda c: c.score, reverse=True)
-    clips = clips[: config.max_clips]
+    clips = _spread_clips(clips, max_clips=config.max_clips)
 
     for rank, clip in enumerate(clips, start=1):
         clip.rank = rank
@@ -324,6 +328,40 @@ def dedupe(
             continue
         kept.append(candidate)
 
+    return kept
+
+
+def _spread_clips(
+    clips: list[Clip],
+    *,
+    max_clips: int,
+    min_gap_s: float = MIN_CLIP_GAP_S,
+) -> list[Clip]:
+    """Pick up to ``max_clips`` from a score-sorted list with temporal diversity.
+
+    Greedily accepts each clip (highest score first) unless its start time is
+    within ``min_gap_s`` of an already-accepted clip.  Once the budget is
+    exhausted, remaining candidates are appended without the gap constraint so
+    we never return fewer clips than the video warrants.
+    """
+    kept: list[Clip] = []
+    deferred: list[Clip] = []
+
+    for clip in clips:
+        too_close = any(abs(clip.start_s - k.start_s) < min_gap_s for k in kept)
+        if not too_close and len(kept) < max_clips:
+            kept.append(clip)
+        else:
+            deferred.append(clip)
+
+    # If the gap constraint left us short, fill from deferred (still score-ordered).
+    for clip in deferred:
+        if len(kept) >= max_clips:
+            break
+        kept.append(clip)
+
+    # Restore chronological order for the rank assignment that follows.
+    kept.sort(key=lambda c: c.start_s)
     return kept
 
 
