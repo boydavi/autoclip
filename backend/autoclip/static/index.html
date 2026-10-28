@@ -844,9 +844,16 @@ async function exportClip(clipId, btn) {
   toast('Rendering clip — this may take a minute…', 'ok');
   try {
     const exp = await api('POST', `/api/clips/${clipId}/export`, { ratio: '9:16', style: 'bold_pop' });
+    // Export is async (202); poll until status leaves 'pending'
+    let record = exp;
+    while (record.status === 'pending') {
+      await new Promise(r => setTimeout(r, 1500));
+      record = await api('GET', `/api/exports/${exp.id}`);
+    }
+    if (record.status === 'failed') throw new Error(record.error || 'Export failed');
     toast('Export ready', 'ok');
-    if (exp.download_url) window.open(exp.download_url, '_blank');
-    if (btn) { btn.textContent = 'Download'; btn.onclick = () => window.open(exp.download_url, '_blank'); btn.disabled = false; }
+    if (record.download_url) window.open(record.download_url, '_blank');
+    if (btn) { btn.textContent = 'Download'; btn.onclick = () => window.open(record.download_url, '_blank'); btn.disabled = false; }
   } catch(e) {
     toast(e.message, 'err');
     if (btn) { btn.disabled = false; btn.textContent = 'Export'; }
