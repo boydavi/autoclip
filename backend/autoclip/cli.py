@@ -5,6 +5,16 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+# Fail fast when run outside the supported interpreter range.  3.14+ breaks
+# MediaPipe wheels; anything below 3.11 lacks the match statement we use.
+if not (3, 11) <= sys.version_info < (3, 13):
+    _v = sys.version.split()[0]
+    sys.exit(
+        f"AutoClip requires Python >=3.11,<3.13 (running {_v}).\n"
+        "Activate the project venv: source .venv/bin/activate  "
+        "or  .venv\\Scripts\\activate"
+    )
+
 import typer
 from rich.console import Console
 from rich.panel import Panel

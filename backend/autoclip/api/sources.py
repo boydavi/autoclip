@@ -25,6 +25,10 @@ router = APIRouter(prefix="/api/sources", tags=["sources"])
 #: videos routinely exceed available RAM.
 UPLOAD_CHUNK = 4 * 1024 * 1024
 
+#: Hard ceiling on upload size. 20 GB covers any realistic local recording;
+#: higher values are most likely a misconfigured client or an accident.
+UPLOAD_MAX_BYTES = 20 * 1024 * 1024 * 1024  # 20 GB
+
 
 @router.get("", response_model=list[SourceOut])
 async def list_sources(limit: int = 50) -> list[SourceOut]:
@@ -148,8 +152,21 @@ async def upload_source(file: UploadFile = File(...)) -> SourceOut:
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as staging:
         staging_path = Path(staging.name)
         try:
+            received = 0
             while chunk := await file.read(UPLOAD_CHUNK):
+                received += len(chunk)
+                if received > UPLOAD_MAX_BYTES:
+                    staging_path.unlink(missing_ok=True)
+                    raise HTTPException(
+                        status_code=413,
+                        detail={
+                            "message": "Upload too large.",
+                            "hint": f"Maximum allowed size is {UPLOAD_MAX_BYTES // (1024**3)} GB.",
+                        },
+                    )
                 staging.write(chunk)
+        except HTTPException:
+            raise
         except Exception as exc:
             staging_path.unlink(missing_ok=True)
             raise HTTPException(status_code=500, detail="Upload failed.") from exc

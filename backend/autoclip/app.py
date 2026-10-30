@@ -10,12 +10,14 @@ from __future__ import annotations
 import contextlib
 import logging
 import os
+import secrets
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import __version__, db, paths
 from .api import api_router
@@ -26,6 +28,32 @@ log = logging.getLogger(__name__)
 
 #: Set to "1" to serve the API without starting the background job worker.
 ENV_NO_WORKER = "AUTOCLIP_NO_WORKER"
+
+#: When set, every /api/* request must carry "Authorization: Bearer <token>".
+#: The health endpoint is intentionally exempt so monitoring tools keep working.
+ENV_API_KEY = "AUTOCLIP_API_KEY"
+
+
+class _BearerAuthMiddleware(BaseHTTPMiddleware):
+    """Reject /api/* requests (except /api/health) unless a valid bearer token is present."""
+
+    def __init__(self, app, *, token: str) -> None:
+        super().__init__(app)
+        self._token = token
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if path.startswith("/api/") and path != "/api/health":
+            auth = request.headers.get("Authorization", "")
+            # Use compare_digest to guard against timing attacks.
+            provided = auth.removeprefix("Bearer ").strip()
+            if not secrets.compare_digest(provided, self._token):
+                return JSONResponse(
+                    status_code=401,
+                    content={"detail": "Unauthorized."},
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+        return await call_next(request)
 
 #: Where the built frontend is looked for, in priority order. The first is the
 #: packaged location (inside the wheel); the second is the dev build output.
@@ -75,6 +103,16 @@ def create_app() -> FastAPI:
         description="Local-first AI video clipper.",
         lifespan=lifespan,
     )
+
+    api_key = os.environ.get(ENV_API_KEY, "").strip()
+    if api_key:
+        app.add_middleware(_BearerAuthMiddleware, token=api_key)
+        log.info("API authentication enabled (AUTOCLIP_API_KEY is set).")
+    else:
+        log.warning(
+            "AUTOCLIP_API_KEY is not set — all API endpoints are unauthenticated. "
+            "Set it before exposing AutoClip beyond localhost."
+        )
 
     app.include_router(api_router)
 
