@@ -31,6 +31,13 @@ ACCEPTED_SUFFIXES = VIDEO_SUFFIXES | AUDIO_SUFFIXES
 
 _YOUTUBE_HOSTS = ("youtube.com", "youtu.be", "www.youtube.com", "m.youtube.com")
 
+#: yt-dlp error fragments that mean "I have no extractor for this URL".
+_UNSUPPORTED_MARKERS = (
+    "unsupported url",
+    "no suitable extractor",
+    "this url is not supported",
+)
+
 #: yt-dlp error fragments that mean "YouTube wants proof you're a human".
 _BOT_CHECK_MARKERS = (
     "sign in to confirm",
@@ -61,6 +68,16 @@ def is_youtube_url(url: str) -> bool:
     except ValueError:
         return False
     return host in _YOUTUBE_HOSTS
+
+
+def is_http_url(url: str) -> bool:
+    """True for any http:// or https:// URL."""
+    from urllib.parse import urlparse
+
+    try:
+        return urlparse(url).scheme.lower() in ("http", "https")
+    except ValueError:
+        return False
 
 
 def slugify(text: str, *, max_length: int = 60) -> str:
@@ -246,6 +263,191 @@ def _find_downloaded_file(directory: Path) -> Path | None:
     if not candidates:
         return None
     return max(candidates, key=lambda p: p.stat().st_size)
+
+
+# --------------------------------------------------------------------------
+# Generic URL (yt-dlp → httpx fallback)
+# --------------------------------------------------------------------------
+
+
+def ingest_url(
+    url: str,
+    settings: IngestSettings | None = None,
+    *,
+    headers: dict[str, str] | None = None,
+    on_progress: Callable[[float], None] | None = None,
+) -> Source:
+    """Download any HTTP(S) URL and return a validated source record.
+
+    Strategy:
+      1. yt-dlp handles 1000+ platforms (Vimeo, Twitch, TikTok, Twitter/X,
+         Loom, etc.) and its generic extractor covers plain media links.
+         Custom headers are forwarded so authenticated URLs work (e.g. Twilio
+         recordings that require Basic auth).
+      2. When yt-dlp raises UnsupportedError the URL is a raw media file it
+         has no extractor for. We fall back to a chunked httpx download with
+         the same headers, which covers S3 presigned URLs, CDN links, and
+         any direct .mp4/.mp3/... endpoint.
+
+    ``headers`` example for a Twilio recording::
+
+        {"Authorization": "Basic <base64(AccountSid:AuthToken)>"}
+    """
+    import yt_dlp
+
+    settings = settings or IngestSettings()
+    source_id = new_id()
+    target_dir = paths.source_media_dir(source_id)
+    target_dir.mkdir(parents=True, exist_ok=True)
+
+    free_bytes = shutil.disk_usage(target_dir).free
+    if free_bytes < 1 * 1024 ** 3:
+        shutil.rmtree(target_dir, ignore_errors=True)
+        raise IngestError(
+            "Not enough disk space to download this URL.",
+            hint=f"Only {free_bytes // (1024 ** 2)} MB free. Free up at least 1 GB and retry.",
+        )
+
+    def _progress_hook(status: dict) -> None:
+        if not on_progress or status.get("status") != "downloading":
+            return
+        total = status.get("total_bytes") or status.get("total_bytes_estimate")
+        done = status.get("downloaded_bytes")
+        if total and done:
+            on_progress(min(1.0, done / total))
+
+    options: dict = {
+        "format": settings.ytdlp_format,
+        "outtmpl": str(target_dir / "source.%(ext)s"),
+        "merge_output_format": "mp4",
+        "quiet": True,
+        "no_warnings": True,
+        "noprogress": True,
+        "progress_hooks": [_progress_hook],
+        "retries": 3,
+        "fragment_retries": 3,
+    }
+    if headers:
+        options["http_headers"] = headers
+    if settings.cookies_from_browser:
+        options["cookiesfrombrowser"] = (settings.cookies_from_browser,)
+
+    use_http_fallback = False
+    try:
+        with yt_dlp.YoutubeDL(options) as ydl:
+            metadata = ydl.extract_info(url, download=True)
+
+        downloaded = _find_downloaded_file(target_dir)
+        if downloaded is None:
+            shutil.rmtree(target_dir, ignore_errors=True)
+            raise IngestError("yt-dlp reported success but produced no media file.")
+
+        info = _probe_and_validate(downloaded)
+        return Source(
+            id=source_id,
+            type="url",
+            url=url,
+            path=str(downloaded),
+            filename=downloaded.name,
+            title=(metadata or {}).get("title") or downloaded.stem,
+            channel=(metadata or {}).get("uploader") or (metadata or {}).get("channel"),
+            duration_s=info.duration_s or float((metadata or {}).get("duration") or 0.0),
+            width=info.width,
+            height=info.height,
+            fps=info.fps,
+            has_audio=info.has_audio,
+            has_video=info.has_video,
+        )
+
+    except yt_dlp.utils.UnsupportedError:
+        use_http_fallback = True
+    except yt_dlp.utils.DownloadError as exc:
+        msg = str(exc).lower()
+        if any(m in msg for m in _UNSUPPORTED_MARKERS):
+            use_http_fallback = True
+        else:
+            shutil.rmtree(target_dir, ignore_errors=True)
+            raise _translate_ytdlp_error(exc, settings) from exc
+    except IngestError:
+        raise
+    except Exception as exc:
+        shutil.rmtree(target_dir, ignore_errors=True)
+        raise IngestError(f"Could not download {url}: {exc}") from exc
+
+    if not use_http_fallback:
+        return  # type: ignore[return-value]  # unreachable, satisfies type checker
+
+    # ------------------------------------------------------------------
+    # Direct HTTP fallback — plain media links, Twilio, S3, CDN, etc.
+    # ------------------------------------------------------------------
+    import httpx
+    from urllib.parse import unquote, urlparse
+
+    req_headers = {"User-Agent": "AutoClip/1.0", **(headers or {})}
+    fname = "source"
+    suffix = ".mp4"
+
+    try:
+        with httpx.stream(
+            "GET", url, headers=req_headers, follow_redirects=True, timeout=30
+        ) as resp:
+            resp.raise_for_status()
+
+            # Infer filename from Content-Disposition, then URL path.
+            cd = resp.headers.get("Content-Disposition", "")
+            if "filename=" in cd:
+                fname = cd.split("filename=")[-1].strip().strip('"\'')
+            else:
+                url_path = unquote(urlparse(str(resp.url)).path)
+                fname = url_path.rsplit("/", 1)[-1] or "source"
+
+            detected_suffix = Path(fname).suffix.lower()
+            if detected_suffix in ACCEPTED_SUFFIXES:
+                suffix = detected_suffix
+
+            staging = target_dir / f"source{suffix}"
+            content_length = resp.headers.get("content-length")
+            received = 0
+            with staging.open("wb") as fh:
+                for chunk in resp.iter_bytes(chunk_size=4 * 1024 * 1024):
+                    received += len(chunk)
+                    fh.write(chunk)
+                    if on_progress and content_length:
+                        on_progress(min(1.0, received / int(content_length)))
+
+    except httpx.HTTPStatusError as exc:
+        shutil.rmtree(target_dir, ignore_errors=True)
+        raise IngestError(
+            f"URL returned HTTP {exc.response.status_code}.",
+            hint=(
+                "Check the URL is correct and that any required authentication "
+                "headers are included (e.g. Authorization: Bearer <token>)."
+            ),
+        ) from exc
+    except Exception as exc:
+        shutil.rmtree(target_dir, ignore_errors=True)
+        raise IngestError(f"Could not download {url}: {exc}") from exc
+
+    try:
+        info = _probe_and_validate(staging)
+    except Exception:
+        shutil.rmtree(target_dir, ignore_errors=True)
+        raise
+
+    return Source(
+        id=source_id,
+        type="url",
+        url=url,
+        path=str(staging),
+        filename=staging.name,
+        title=Path(fname).stem,
+        duration_s=info.duration_s,
+        width=info.width,
+        height=info.height,
+        fps=info.fps,
+        has_audio=info.has_audio,
+        has_video=info.has_video,
+    )
 
 
 # --------------------------------------------------------------------------

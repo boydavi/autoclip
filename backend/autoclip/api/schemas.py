@@ -61,6 +61,18 @@ class YouTubeIngestIn(BaseModel):
     cookies_from_browser: str | None = None
 
 
+class UrlIngestIn(BaseModel):
+    """Ingest any HTTP(S) URL — YouTube, Vimeo, Twitch, Twilio recordings, S3, CDN, etc."""
+
+    url: str
+    #: Extra request headers forwarded to yt-dlp and the httpx fallback.
+    #: Use this for authenticated URLs, e.g.:
+    #:   {"Authorization": "Basic <base64(AccountSid:AuthToken)>"}  — Twilio
+    #:   {"Authorization": "Bearer <token>"}                        — CDN / API
+    headers: dict[str, str] | None = None
+    cookies_from_browser: str | None = None
+
+
 class JobSettingsIn(BaseModel):
     """Per-job overrides. Anything omitted falls back to saved settings."""
 

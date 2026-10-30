@@ -15,7 +15,7 @@ from ..config import load as load_settings
 from ..db import store
 from ..db.models import Source, new_id, utcnow
 from ..pipeline import ingest
-from .schemas import SourceOut, YouTubeIngestIn
+from .schemas import SourceOut, UrlIngestIn, YouTubeIngestIn
 
 log = logging.getLogger(__name__)
 
@@ -125,6 +125,104 @@ async def _do_ingest_youtube(source_id: str, url: str, settings) -> None:
         log.info("Async ingest complete for source %s (%s).", source_id, source.title)
     except Exception as exc:
         log.error("Async ingest failed for source %s: %s", source_id, exc)
+        await asyncio.to_thread(
+            store.update_source_after_ingest,
+            source_id,
+            ingest_status="failed",
+            ingest_error=str(exc),
+        )
+
+
+@router.post("/url", status_code=202)
+async def ingest_url(
+    payload: UrlIngestIn,
+    background_tasks: BackgroundTasks,
+) -> JSONResponse:
+    """Ingest any HTTP(S) URL — YouTube, Vimeo, Twitch, Twilio recordings, S3 links, etc.
+
+    yt-dlp handles 1000+ platforms automatically. For plain media URLs (direct
+    .mp4, Twilio recordings, presigned S3 links) set ``headers`` for auth if needed.
+
+    Returns 202 immediately; poll ``GET /api/sources/{id}`` until ``ingest_status``
+    is ``"ready"`` (or ``"failed"``).
+    """
+    if not ingest.is_http_url(payload.url):
+        raise HTTPException(
+            status_code=400,
+            detail="Only http:// and https:// URLs are supported.",
+        )
+
+    settings = load_settings().ingest
+    if payload.cookies_from_browser is not None:
+        settings = settings.model_copy(
+            update={"cookies_from_browser": payload.cookies_from_browser}
+        )
+
+    # Reuse an existing ready source for the same URL to avoid re-downloading.
+    existing = await asyncio.to_thread(store.find_ready_source_by_url, payload.url)
+    if existing is not None:
+        log.info("Reusing source %s for %s.", existing.id, payload.url)
+        return JSONResponse(
+            status_code=201, content=SourceOut.of(existing).model_dump(mode="json")
+        )
+
+    source_id = new_id()
+    pending = Source(
+        id=source_id,
+        type="url",
+        url=payload.url,
+        path="",
+        title="",
+        created_at=utcnow(),
+        ingest_status="pending",
+    )
+    await asyncio.to_thread(store.create_source, pending)
+    background_tasks.add_task(
+        _do_ingest_url, source_id, payload.url, settings, payload.headers
+    )
+    return JSONResponse(
+        status_code=202,
+        content={"id": source_id, "ingest_status": "pending"},
+    )
+
+
+async def _do_ingest_url(
+    source_id: str,
+    url: str,
+    settings,
+    headers: dict[str, str] | None,
+) -> None:
+    """Background task: download the URL and update the source record."""
+    try:
+        source = await asyncio.to_thread(
+            ingest.ingest_url, url, settings, headers=headers
+        )
+        source = Source(
+            id=source_id,
+            type=source.type,
+            url=source.url,
+            path=source.path,
+            filename=source.filename,
+            title=source.title,
+            channel=source.channel,
+            duration_s=source.duration_s,
+            width=source.width,
+            height=source.height,
+            fps=source.fps,
+            has_audio=source.has_audio,
+            has_video=source.has_video,
+            created_at=source.created_at,
+            ingest_status="ready",
+        )
+        await asyncio.to_thread(
+            store.update_source_after_ingest,
+            source_id,
+            ingest_status="ready",
+            source=source,
+        )
+        log.info("URL ingest complete for source %s (%s).", source_id, source.title)
+    except Exception as exc:
+        log.error("URL ingest failed for source %s: %s", source_id, exc)
         await asyncio.to_thread(
             store.update_source_after_ingest,
             source_id,
