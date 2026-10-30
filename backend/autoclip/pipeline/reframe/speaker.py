@@ -162,7 +162,17 @@ def _assignments_from_turns(
 
     # Close gaps so the shot is fully covered; a hole would leave the crop
     # undefined for those frames.
-    assignments[0] = SpeakerAssignment(shot_start_s, assignments[0].end_s, assignments[0].track)
+    #
+    # Leading gap: when the first mapped turn doesn't start at shot_start_s the
+    # opening frames have no mapped speaker.  Extend the first track back only
+    # when there is no gap; otherwise the opening speaker is unknown and we
+    # keep track=None so the reframer holds a neutral position instead of
+    # mis-framing the wrong person.
+    if assignments[0].start_s > shot_start_s:
+        assignments.insert(0, SpeakerAssignment(shot_start_s, assignments[0].start_s, None))
+    else:
+        assignments[0] = SpeakerAssignment(shot_start_s, assignments[0].end_s, assignments[0].track)
+    # Trailing gap: extend the last mapped speaker to cover the shot end.
     assignments[-1] = SpeakerAssignment(assignments[-1].start_s, shot_end_s, assignments[-1].track)
     for index in range(len(assignments) - 1):
         assignments[index] = SpeakerAssignment(

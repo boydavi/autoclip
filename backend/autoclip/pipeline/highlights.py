@@ -273,6 +273,15 @@ def build_clips(
             )
             continue
 
+        # Re-derive the hook from the refined boundary so the review UI shows
+        # the actual opening words rather than the LLM's pre-snap proposal.
+        # Sentence snapping can shift the start by several words; if the stored
+        # hook still quotes the old opening, users can't verify the clip at a glance.
+        hook = transcript.text_between(
+            boundary.start_word,
+            min(boundary.start_word + 7, boundary.end_word),
+        )
+
         clips.append(
             Clip(
                 id=new_id(),
@@ -285,7 +294,7 @@ def build_clips(
                 or transcript.text_between(
                     boundary.start_word, min(boundary.start_word + 8, boundary.end_word)
                 ),
-                hook=candidate.hook.strip(),
+                hook=hook,
                 score=candidate.score,
                 reason=candidate.reason.strip(),
             )
@@ -370,7 +379,7 @@ def _dedupe_clips(clips: list[Clip], *, iou_threshold: float = DEDUPE_IOU) -> li
     kept: list[Clip] = []
     for clip in ordered:
         if any(
-            _iou(clip.start_word, clip.end_word, other.start_word, other.end_word) > iou_threshold
+            _time_iou(clip.start_s, clip.end_s, other.start_s, other.end_s) > iou_threshold
             for other in kept
         ):
             continue
@@ -384,4 +393,13 @@ def _iou(a_start: int, a_end: int, b_start: int, b_end: int) -> float:
     if intersection == 0:
         return 0.0
     union = (a_end - a_start + 1) + (b_end - b_start + 1) - intersection
+    return intersection / union if union else 0.0
+
+
+def _time_iou(a_start: float, a_end: float, b_start: float, b_end: float) -> float:
+    """Intersection over union of two time ranges (seconds)."""
+    intersection = max(0.0, min(a_end, b_end) - max(a_start, b_start))
+    if intersection == 0.0:
+        return 0.0
+    union = (a_end - a_start) + (b_end - b_start) - intersection
     return intersection / union if union else 0.0

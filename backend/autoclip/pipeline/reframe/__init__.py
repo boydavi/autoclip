@@ -341,10 +341,22 @@ def _wide_segment(
     robotic thing an auto-reframer does. If they fit, lock on their centroid; if
     they don't, fit the whole frame rather than cutting someone out.
     """
-    observations: list[FaceObservation] = [
-        o for track in visible for o in track.observations_between(start_s, end_s)
-    ]
-    if not observations:
+    # Use per-track mean positions rather than pooling all raw observations.
+    # Pooling inflates the apparent spread when a face moves across the frame:
+    # the min(left) and max(right) across all time can exceed the crop width
+    # even when both faces fit comfortably at any single moment, triggering the
+    # blurred-background fit fallback unnecessarily.
+    track_means: list[tuple[float, float, float]] = []  # (mean_left, mean_right, mean_eye_y)
+    for track in visible:
+        obs = track.observations_between(start_s, end_s)
+        if obs:
+            track_means.append((
+                sum(o.left for o in obs) / len(obs),
+                sum(o.right for o in obs) / len(obs),
+                sum(o.eye_y for o in obs) / len(obs),
+            ))
+
+    if not track_means:
         return _general_segment(
             start_s=start_s,
             end_s=end_s,
@@ -354,8 +366,8 @@ def _wide_segment(
             crop_h=crop_h,
         )
 
-    left = min(o.left for o in observations)
-    right = max(o.right for o in observations)
+    left = min(m[0] for m in track_means)
+    right = max(m[1] for m in track_means)
     spread = right - left
 
     if spread > crop_w * FIT_IF_SPREAD_EXCEEDS:
@@ -370,7 +382,7 @@ def _wide_segment(
         )
 
     centre_x = (left + right) / 2
-    eye_y = sum(o.eye_y for o in observations) / len(observations)
+    eye_y = sum(m[2] for m in track_means) / len(track_means)
 
     return CropSegment(
         start_s=start_s,
