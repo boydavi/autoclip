@@ -80,6 +80,82 @@ def is_http_url(url: str) -> bool:
         return False
 
 
+#: Headers a caller must never be able to inject — they can be used to reach
+#: cloud-provider metadata services or to forge forwarding context.
+_BLOCKED_REQUEST_HEADERS: frozenset[str] = frozenset({
+    "host",
+    "metadata-flavor",                   # GCP metadata service
+    "x-aws-ec2-metadata-token",          # AWS IMDSv2
+    "x-aws-ec2-metadata-token-ttl-seconds",
+    "x-forwarded-for",
+    "x-forwarded-host",
+    "x-real-ip",
+})
+
+#: Max redirects to follow in the httpx fallback path.
+_MAX_REDIRECTS = 5
+
+
+def _validate_ssrf_safe(url: str) -> None:
+    """Resolve the URL's hostname and raise IngestError if any address is internal.
+
+    Resolving and blocking at the Python level (rather than relying on the
+    network boundary alone) prevents SSRF against metadata services, internal
+    APIs, and link-local addresses reachable from the host running AutoClip.
+    """
+    import ipaddress
+    import socket
+    from urllib.parse import urlparse
+
+    parsed = urlparse(url)
+    if parsed.scheme.lower() not in ("http", "https"):
+        raise IngestError("Only http:// and https:// URLs are supported.")
+
+    hostname = (parsed.hostname or "").rstrip(".").lower()
+    if not hostname:
+        raise IngestError("URL has no hostname.")
+
+    try:
+        results = socket.getaddrinfo(hostname, None)
+    except socket.gaierror as exc:
+        raise IngestError(
+            f"Could not resolve hostname '{hostname}'.",
+            hint=str(exc),
+        ) from exc
+
+    for _family, _type, _proto, _canonname, sockaddr in results:
+        ip_str = sockaddr[0]
+        try:
+            addr = ipaddress.ip_address(ip_str)
+        except ValueError:
+            continue
+        if (
+            addr.is_private
+            or addr.is_loopback
+            or addr.is_link_local
+            or addr.is_multicast
+            or addr.is_reserved
+            or addr.is_unspecified
+        ):
+            raise IngestError(
+                "URL resolves to a private or reserved network address.",
+                hint=(
+                    "AutoClip cannot fetch from internal addresses to prevent "
+                    "unintended access to services on your network."
+                ),
+            )
+
+
+def _sanitize_headers(headers: dict[str, str] | None) -> dict[str, str]:
+    """Return a copy of headers with blocked keys removed."""
+    if not headers:
+        return {}
+    return {
+        k: v for k, v in headers.items()
+        if k.lower() not in _BLOCKED_REQUEST_HEADERS
+    }
+
+
 def slugify(text: str, *, max_length: int = 60) -> str:
     """Turn a title into a filesystem- and URL-safe slug."""
     slug = re.sub(r"[^\w\s-]", "", text, flags=re.UNICODE).strip().lower()
@@ -282,18 +358,27 @@ def ingest_url(
     Strategy:
       1. yt-dlp handles 1000+ platforms (Vimeo, Twitch, TikTok, Twitter/X,
          Loom, etc.) and its generic extractor covers plain media links.
-         Custom headers are forwarded so authenticated URLs work (e.g. Twilio
-         recordings that require Basic auth).
-      2. When yt-dlp raises UnsupportedError the URL is a raw media file it
-         has no extractor for. We fall back to a chunked httpx download with
-         the same headers, which covers S3 presigned URLs, CDN links, and
-         any direct .mp4/.mp3/... endpoint.
+      2. When auth headers are present, or when yt-dlp raises UnsupportedError,
+         fall back to a direct httpx download. Auth headers are never forwarded
+         to yt-dlp to prevent credential leakage to third-party CDNs.
+      3. Every URL (including redirect hops) is validated against SSRF before
+         any network connection is made.
 
     ``headers`` example for a Twilio recording::
 
         {"Authorization": "Basic <base64(AccountSid:AuthToken)>"}
     """
     import yt_dlp
+
+    # Reject internal/private addresses before touching the network.
+    _validate_ssrf_safe(url)
+    safe_headers = _sanitize_headers(headers)
+
+    # When auth headers are present, bypass yt-dlp entirely. yt-dlp passes
+    # http_headers to every host it contacts (CDN, manifest, segment URLs),
+    # which would leak the caller's credentials to third-party servers.
+    has_auth = any(k.lower() == "authorization" for k in safe_headers)
+    use_http_fallback = has_auth
 
     settings = settings or IngestSettings()
     source_id = new_id()
@@ -308,113 +393,165 @@ def ingest_url(
             hint=f"Only {free_bytes // (1024 ** 2)} MB free. Free up at least 1 GB and retry.",
         )
 
-    def _progress_hook(status: dict) -> None:
-        if not on_progress or status.get("status") != "downloading":
-            return
-        total = status.get("total_bytes") or status.get("total_bytes_estimate")
-        done = status.get("downloaded_bytes")
-        if total and done:
-            on_progress(min(1.0, done / total))
+    # ------------------------------------------------------------------
+    # Path 1: yt-dlp (1000+ platforms, no auth headers)
+    # ------------------------------------------------------------------
+    if not use_http_fallback:
+        def _progress_hook(status: dict) -> None:
+            if not on_progress or status.get("status") != "downloading":
+                return
+            total = status.get("total_bytes") or status.get("total_bytes_estimate")
+            done = status.get("downloaded_bytes")
+            if total and done:
+                on_progress(min(1.0, done / total))
 
-    options: dict = {
-        "format": settings.ytdlp_format,
-        "outtmpl": str(target_dir / "source.%(ext)s"),
-        "merge_output_format": "mp4",
-        "quiet": True,
-        "no_warnings": True,
-        "noprogress": True,
-        "progress_hooks": [_progress_hook],
-        "retries": 3,
-        "fragment_retries": 3,
-    }
-    if headers:
-        options["http_headers"] = headers
-    if settings.cookies_from_browser:
-        options["cookiesfrombrowser"] = (settings.cookies_from_browser,)
+        options: dict = {
+            "format": settings.ytdlp_format,
+            "outtmpl": str(target_dir / "source.%(ext)s"),
+            "merge_output_format": "mp4",
+            "quiet": True,
+            "no_warnings": True,
+            "noprogress": True,
+            "progress_hooks": [_progress_hook],
+            "retries": 3,
+            "fragment_retries": 3,
+        }
+        if settings.cookies_from_browser:
+            options["cookiesfrombrowser"] = (settings.cookies_from_browser,)
 
-    use_http_fallback = False
-    try:
-        with yt_dlp.YoutubeDL(options) as ydl:
-            metadata = ydl.extract_info(url, download=True)
+        try:
+            with yt_dlp.YoutubeDL(options) as ydl:
+                metadata = ydl.extract_info(url, download=True)
 
-        downloaded = _find_downloaded_file(target_dir)
-        if downloaded is None:
-            shutil.rmtree(target_dir, ignore_errors=True)
-            raise IngestError("yt-dlp reported success but produced no media file.")
+            downloaded = _find_downloaded_file(target_dir)
+            if downloaded is None:
+                shutil.rmtree(target_dir, ignore_errors=True)
+                raise IngestError("yt-dlp reported success but produced no media file.")
 
-        info = _probe_and_validate(downloaded)
-        return Source(
-            id=source_id,
-            type="url",
-            url=url,
-            path=str(downloaded),
-            filename=downloaded.name,
-            title=(metadata or {}).get("title") or downloaded.stem,
-            channel=(metadata or {}).get("uploader") or (metadata or {}).get("channel"),
-            duration_s=info.duration_s or float((metadata or {}).get("duration") or 0.0),
-            width=info.width,
-            height=info.height,
-            fps=info.fps,
-            has_audio=info.has_audio,
-            has_video=info.has_video,
-        )
+            info = _probe_and_validate(downloaded)
+            return Source(
+                id=source_id,
+                type="url",
+                url=url,
+                path=str(downloaded),
+                filename=downloaded.name,
+                title=(metadata or {}).get("title") or downloaded.stem,
+                channel=(metadata or {}).get("uploader") or (metadata or {}).get("channel"),
+                duration_s=info.duration_s or float((metadata or {}).get("duration") or 0.0),
+                width=info.width,
+                height=info.height,
+                fps=info.fps,
+                has_audio=info.has_audio,
+                has_video=info.has_video,
+            )
 
-    except yt_dlp.utils.UnsupportedError:
-        use_http_fallback = True
-    except yt_dlp.utils.DownloadError as exc:
-        msg = str(exc).lower()
-        if any(m in msg for m in _UNSUPPORTED_MARKERS):
+        except yt_dlp.utils.UnsupportedError:
             use_http_fallback = True
-        else:
+        except yt_dlp.utils.DownloadError as exc:
+            msg = str(exc).lower()
+            if any(m in msg for m in _UNSUPPORTED_MARKERS):
+                use_http_fallback = True
+            else:
+                shutil.rmtree(target_dir, ignore_errors=True)
+                raise _translate_ytdlp_error(exc, settings) from exc
+        except IngestError:
+            raise
+        except Exception as exc:
             shutil.rmtree(target_dir, ignore_errors=True)
-            raise _translate_ytdlp_error(exc, settings) from exc
-    except IngestError:
-        raise
-    except Exception as exc:
-        shutil.rmtree(target_dir, ignore_errors=True)
-        raise IngestError(f"Could not download {url}: {exc}") from exc
+            raise IngestError(f"Could not download the URL.") from exc
 
     if not use_http_fallback:
-        return  # type: ignore[return-value]  # unreachable, satisfies type checker
+        # Both yt-dlp paths returned without raising — should not happen.
+        shutil.rmtree(target_dir, ignore_errors=True)
+        raise IngestError("yt-dlp reported success but produced no usable output.")
 
     # ------------------------------------------------------------------
-    # Direct HTTP fallback — plain media links, Twilio, S3, CDN, etc.
+    # Path 2: direct httpx download — Twilio, S3, CDN, plain media URLs.
+    # Auth headers stay on the origin; they are dropped on cross-origin
+    # redirects by stripping the header after the first hop.
     # ------------------------------------------------------------------
     import httpx
-    from urllib.parse import unquote, urlparse
+    from urllib.parse import unquote, urljoin, urlparse
 
-    req_headers = {"User-Agent": "AutoClip/1.0", **(headers or {})}
+    UPLOAD_MAX_BYTES = 20 * 1024 * 1024 * 1024  # 20 GB — same ceiling as the upload endpoint
+
+    req_headers = {"User-Agent": "AutoClip/1.0", **safe_headers}
     fname = "source"
     suffix = ".mp4"
+    current_url = url
+    origin_host = (urlparse(url).hostname or "").lower()
 
     try:
-        with httpx.stream(
-            "GET", url, headers=req_headers, follow_redirects=True, timeout=30
-        ) as resp:
-            resp.raise_for_status()
+        for _hop in range(_MAX_REDIRECTS + 1):
+            if _hop == _MAX_REDIRECTS:
+                shutil.rmtree(target_dir, ignore_errors=True)
+                raise IngestError(
+                    "Too many redirects.",
+                    hint=f"Followed {_MAX_REDIRECTS} redirects without reaching the media file.",
+                )
 
-            # Infer filename from Content-Disposition, then URL path.
-            cd = resp.headers.get("Content-Disposition", "")
-            if "filename=" in cd:
-                fname = cd.split("filename=")[-1].strip().strip('"\'')
-            else:
-                url_path = unquote(urlparse(str(resp.url)).path)
-                fname = url_path.rsplit("/", 1)[-1] or "source"
+            # Re-validate every redirect target against SSRF.
+            _validate_ssrf_safe(current_url)
 
-            detected_suffix = Path(fname).suffix.lower()
-            if detected_suffix in ACCEPTED_SUFFIXES:
-                suffix = detected_suffix
+            # Drop auth headers when the redirect leaves the original host.
+            hop_host = (urlparse(current_url).hostname or "").lower()
+            hop_headers = req_headers if hop_host == origin_host else {
+                k: v for k, v in req_headers.items() if k.lower() != "authorization"
+            }
 
-            staging = target_dir / f"source{suffix}"
-            content_length = resp.headers.get("content-length")
-            received = 0
-            with staging.open("wb") as fh:
-                for chunk in resp.iter_bytes(chunk_size=4 * 1024 * 1024):
-                    received += len(chunk)
-                    fh.write(chunk)
-                    if on_progress and content_length:
-                        on_progress(min(1.0, received / int(content_length)))
+            with httpx.stream(
+                "GET", current_url, headers=hop_headers,
+                follow_redirects=False, timeout=30,
+            ) as resp:
+                if resp.is_redirect:
+                    location = resp.headers.get("location", "")
+                    if not location:
+                        shutil.rmtree(target_dir, ignore_errors=True)
+                        raise IngestError("Server sent a redirect with no Location header.")
+                    current_url = urljoin(current_url, location)
+                    continue
 
+                resp.raise_for_status()
+
+                # Reject oversized responses early from Content-Length.
+                cl = resp.headers.get("content-length")
+                if cl and int(cl) > UPLOAD_MAX_BYTES:
+                    shutil.rmtree(target_dir, ignore_errors=True)
+                    raise IngestError(
+                        "Remote file is too large.",
+                        hint=f"Maximum allowed size is {UPLOAD_MAX_BYTES // (1024**3)} GB.",
+                    )
+
+                # Infer filename from Content-Disposition, then URL path.
+                cd = resp.headers.get("Content-Disposition", "")
+                if "filename=" in cd:
+                    fname = cd.split("filename=")[-1].strip().strip('"\'')
+                else:
+                    url_path = unquote(urlparse(current_url).path)
+                    fname = url_path.rsplit("/", 1)[-1] or "source"
+
+                detected_suffix = Path(fname).suffix.lower()
+                if detected_suffix in ACCEPTED_SUFFIXES:
+                    suffix = detected_suffix
+
+                staging = target_dir / f"source{suffix}"
+                received = 0
+                with staging.open("wb") as fh:
+                    for chunk in resp.iter_bytes(chunk_size=4 * 1024 * 1024):
+                        received += len(chunk)
+                        if received > UPLOAD_MAX_BYTES:
+                            shutil.rmtree(target_dir, ignore_errors=True)
+                            raise IngestError(
+                                "Remote file exceeded the size limit during download.",
+                                hint=f"Maximum allowed size is {UPLOAD_MAX_BYTES // (1024**3)} GB.",
+                            )
+                        fh.write(chunk)
+                        if on_progress and cl:
+                            on_progress(min(1.0, received / int(cl)))
+                break  # success
+
+    except IngestError:
+        raise
     except httpx.HTTPStatusError as exc:
         shutil.rmtree(target_dir, ignore_errors=True)
         raise IngestError(
@@ -426,7 +563,7 @@ def ingest_url(
         ) from exc
     except Exception as exc:
         shutil.rmtree(target_dir, ignore_errors=True)
-        raise IngestError(f"Could not download {url}: {exc}") from exc
+        raise IngestError("Could not download the URL.") from exc
 
     try:
         info = _probe_and_validate(staging)
