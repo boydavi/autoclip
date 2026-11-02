@@ -8,11 +8,13 @@ Node.js at runtime.
 from __future__ import annotations
 
 import contextlib
+import ipaddress
 import logging
 import os
 import secrets
 from collections.abc import AsyncIterator
 from pathlib import Path
+from urllib.parse import urlsplit
 
 from fastapi import FastAPI, Request
 from fastapi.responses import FileResponse, JSONResponse
@@ -55,6 +57,88 @@ class _BearerAuthMiddleware(BaseHTTPMiddleware):
                     headers={"WWW-Authenticate": "Bearer"},
                 )
         return await call_next(request)
+
+
+#: Extra browser origins (comma-separated, e.g. "https://tool.example,http://10.0.0.5:3000")
+#: allowed to make state-changing requests. The UI's own origin is always allowed.
+ENV_ALLOWED_ORIGINS = "AUTOCLIP_ALLOWED_ORIGINS"
+
+#: Vite's dev server (`npm run dev`), which proxies /api to this backend.
+DEV_ORIGINS = ("http://localhost:5173", "http://127.0.0.1:5173")
+
+_UNSAFE_METHODS = frozenset({"POST", "PUT", "PATCH", "DELETE"})
+
+
+def origin_allowed(origin: str, host: str, allowed: frozenset[str]) -> bool:
+    """Whether a browser-supplied ``Origin`` may make a state-changing request.
+
+    Same-origin (the Origin's host:port equals the request's Host) is accepted
+    only when that Host is ``localhost`` or an IP address. A DNS-rebinding page
+    (``evil.example`` re-pointed at 127.0.0.1) sends matching Origin and Host
+    headers, so a name-based match proves nothing; reaching AutoClip under a
+    hostname requires listing its origin explicitly. The literal ``null``
+    origin (sandboxed iframes, file:// pages) is never allowed.
+    """
+    origin = origin.strip().lower()
+    if not origin or origin == "null":
+        return False
+    if origin in allowed:
+        return True
+    netloc = urlsplit(origin).netloc
+    if not netloc or netloc != host.strip().lower():
+        return False
+    return _is_trusted_host(host)
+
+
+def _is_trusted_host(host: str) -> bool:
+    """``localhost`` or an IP literal: names an attacker's DNS cannot hijack."""
+    name = urlsplit(f"//{host.strip()}").hostname or ""
+    if name == "localhost":
+        return True
+    try:
+        ipaddress.ip_address(name)
+    except ValueError:
+        return False
+    return True
+
+
+class _OriginCheckMiddleware(BaseHTTPMiddleware):
+    """Block cross-site state changes against /api/*.
+
+    Browsers let any web page POST a multipart form to ``localhost`` without a
+    CORS preflight, so a page you merely visit could upload files or start jobs.
+    Browsers always attach ``Origin`` to such requests and pages cannot forge or
+    drop it, so rejecting unknown origins closes that hole. Requests with no
+    Origin (curl, scripts, other servers) are not browser-driven and pass; they
+    are covered by ``AUTOCLIP_API_KEY`` when set. Reads (GET) are untouched.
+    """
+
+    def __init__(self, app, *, allowed: frozenset[str]) -> None:
+        super().__init__(app)
+        self._allowed = allowed
+
+    async def dispatch(self, request: Request, call_next):
+        if request.method in _UNSAFE_METHODS and request.url.path.startswith("/api/"):
+            origin = request.headers.get("origin")
+            if origin is not None and not origin_allowed(
+                origin, request.headers.get("host", ""), self._allowed
+            ):
+                log.warning("Blocked cross-origin %s %s from %r.", request.method, request.url.path, origin)
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "detail": "Cross-origin request blocked.",
+                        "hint": f"Open AutoClip from its own address, or add this origin to {ENV_ALLOWED_ORIGINS}.",
+                    },
+                )
+        return await call_next(request)
+
+
+def _allowed_origins() -> frozenset[str]:
+    extra = os.environ.get(ENV_ALLOWED_ORIGINS, "")
+    configured = {o.strip().rstrip("/").lower() for o in extra.split(",") if o.strip()}
+    return frozenset({*DEV_ORIGINS, *configured})
+
 
 #: Where the built frontend is looked for, in priority order. The first is the
 #: packaged location (inside the wheel); the second is the dev build output.
@@ -122,6 +206,10 @@ def create_app() -> FastAPI:
             "AUTOCLIP_API_KEY is not set — all API endpoints are unauthenticated. "
             "Set it before exposing AutoClip beyond localhost."
         )
+
+    # Added after the auth middleware so it runs first (the last one added is
+    # outermost): a cross-site request is refused before auth is even consulted.
+    app.add_middleware(_OriginCheckMiddleware, allowed=_allowed_origins())
 
     app.include_router(api_router)
 
