@@ -19,6 +19,14 @@ export interface Source {
   has_audio: boolean
   has_video: boolean
   created_at: string
+  ingest_status?: 'pending' | 'ready' | 'failed'
+  ingest_error?: string | null
+}
+
+/** 202 body from the async URL ingest endpoints; poll getSource until ready. */
+export interface IngestAccepted {
+  id: string
+  ingest_status: 'pending'
 }
 
 export type JobStatus = 'queued' | 'running' | 'failed' | 'done' | 'cancelled'
@@ -46,6 +54,9 @@ export interface ExportRecord {
   size_bytes: number
   created_at: string
   download_url: string
+  /** The render runs in the background; only 'done' records have a file to download. */
+  status: 'pending' | 'done' | 'failed'
+  error: string | null
 }
 
 export type ClipStatus = 'candidate' | 'kept' | 'discarded' | 'exported'
@@ -131,8 +142,18 @@ export interface ProviderStatus {
 
 export interface Settings {
   active_provider: string
-  providers: Record<string, { model: string; base_url: string | null }>
-  whisper: { model: string; compute_type: string; language: string; diarization: boolean }
+  providers: Record<
+    string,
+    { model: string; base_url: string | null; concurrency: number | null }
+  >
+  whisper: {
+    model: string
+    compute_type: string
+    language: string
+    diarization: boolean
+    provider: 'local' | 'groq'
+    groq_model: string
+  }
   clips: { min_duration_s: number; max_duration_s: number; max_clips: number }
   ingest: {
     ytdlp_format: string
@@ -145,7 +166,11 @@ export interface Settings {
     loudness_lufs: number
     prefer_hardware_encoder: boolean
     crf: number
+    preset: string
+    scan_only: boolean
     write_srt: boolean
+    music_enabled: boolean
+    music_volume: number
   }
   insecure_secret_storage: boolean
   keys_present: Record<string, boolean>
@@ -164,6 +189,34 @@ export interface SystemStatus {
   diarization_available: boolean
 }
 
+export type PromptStyle =
+  | 'general'
+  | 'interview'
+  | 'tutorial'
+  | 'sales'
+  | 'comedy'
+  | 'keynote'
+  | 'product-demo'
+  | 'debate'
+  | 'storytime'
+
+export interface MusicTrack {
+  filename: string
+  size_bytes: number
+}
+
+export interface CostEstimate {
+  duration_s: number
+  windows: number
+  whisper_provider: string
+  whisper_cost_usd: number
+  llm_provider: string
+  llm_model: string
+  llm_cost_per_window_usd: number
+  llm_cost_usd: number
+  total_usd: number
+}
+
 export interface JobSettingsOverrides {
   provider?: string
   whisper_model?: string
@@ -174,6 +227,8 @@ export interface JobSettingsOverrides {
   max_clips?: number
   caption_style?: string
   ratio?: string
+  prompt_style?: PromptStyle
+  music_track?: string
 }
 
 /** An API error carrying the server's message and its actionable hint. */
@@ -229,8 +284,16 @@ export const api = {
 
   listSources: () => request<Source[]>('/api/sources'),
 
+  getSource: (id: string) => request<Source>(`/api/sources/${id}`),
+
   ingestYouTube: (url: string, cookiesFromBrowser?: string) =>
-    request<Source>('/api/sources/youtube', {
+    request<Source | IngestAccepted>('/api/sources/youtube', {
+      method: 'POST',
+      body: JSON.stringify({ url, cookies_from_browser: cookiesFromBrowser || null }),
+    }),
+
+  ingestUrl: (url: string, cookiesFromBrowser?: string) =>
+    request<Source | IngestAccepted>('/api/sources/url', {
       method: 'POST',
       body: JSON.stringify({ url, cookies_from_browser: cookiesFromBrowser || null }),
     }),
@@ -249,6 +312,9 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ source_id: sourceId, settings }),
     }),
+
+  deleteJob: (id: string) => request<void>(`/api/jobs/${id}`, { method: 'DELETE' }),
+  deleteSource: (id: string) => request<void>(`/api/sources/${id}`, { method: 'DELETE' }),
 
   cancelJob: (id: string) => request<Job>(`/api/jobs/${id}/cancel`, { method: 'POST' }),
   retryJob: (id: string) => request<Job>(`/api/jobs/${id}/retry`, { method: 'POST' }),
@@ -279,6 +345,8 @@ export const api = {
       body: JSON.stringify({ ratio, style, write_srt: writeSrt }),
     }),
 
+  getExport: (exportId: string) => request<ExportRecord>(`/api/exports/${exportId}`),
+
   captionStyles: () => request<CaptionStyle[]>('/api/caption-styles'),
   providerStatus: () => request<ProviderStatus[]>('/api/providers/status'),
 
@@ -296,6 +364,65 @@ export const api = {
     request<void>(`/api/settings/secrets/${key}`, { method: 'DELETE' }),
 
   mediaUrl: (jobId: string) => `/api/jobs/${jobId}/media`,
+
+  estimateJob: (sourceId: string) => request<CostEstimate>(`/api/estimate/${sourceId}`),
+
+  listMusicTracks: () => request<MusicTrack[]>('/api/music'),
+  uploadMusicTrack: (file: File) => {
+    const form = new FormData()
+    form.append('file', file)
+    return request<MusicTrack>('/api/music', { method: 'POST', body: form })
+  },
+  deleteMusicTrack: (filename: string) =>
+    request<void>(`/api/music/${encodeURIComponent(filename)}`, { method: 'DELETE' }),
+}
+
+const INGEST_POLL_MS = 1500
+const INGEST_TIMEOUT_MS = 60 * 60 * 1000
+
+/**
+ * Resolve an ingest response to a ready Source. Reused/uploaded sources arrive
+ * complete (201); new downloads arrive as 202 {id} and are polled until the
+ * background download finishes or fails.
+ */
+export async function waitForSource(
+  accepted: Source | IngestAccepted,
+  isCancelled: () => boolean = () => false,
+): Promise<Source> {
+  if ('duration_s' in accepted && accepted.ingest_status !== 'pending') return accepted
+  const deadline = Date.now() + INGEST_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    if (isCancelled()) throw new Error('Cancelled.')
+    await new Promise((resolve) => setTimeout(resolve, INGEST_POLL_MS))
+    const source = await api.getSource(accepted.id)
+    if (source.ingest_status === 'failed') {
+      throw new ApiError(source.ingest_error || 'Download failed.', 422)
+    }
+    if (source.ingest_status !== 'pending') return source
+  }
+  throw new ApiError('Download timed out.', 504)
+}
+
+const EXPORT_POLL_MS = 1000
+const EXPORT_TIMEOUT_MS = 30 * 60 * 1000
+
+/** Poll a background export until it is done; throws if it fails or times out. */
+export async function waitForExport(
+  record: ExportRecord,
+  isCancelled: () => boolean = () => false,
+): Promise<ExportRecord> {
+  const deadline = Date.now() + EXPORT_TIMEOUT_MS
+  let current = record
+  while (current.status === 'pending') {
+    if (isCancelled()) throw new Error('Cancelled.')
+    if (Date.now() > deadline) throw new ApiError('Export timed out.', 504)
+    await new Promise((resolve) => setTimeout(resolve, EXPORT_POLL_MS))
+    current = await api.getExport(record.id)
+  }
+  if (current.status === 'failed') {
+    throw new ApiError(current.error || 'Export failed.', 500)
+  }
+  return current
 }
 
 /** Format seconds as m:ss, or h:mm:ss past an hour. */

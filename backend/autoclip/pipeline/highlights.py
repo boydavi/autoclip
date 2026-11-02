@@ -140,6 +140,18 @@ def render_window_text(transcript: Transcript, first: int, last: int) -> str:
 # --------------------------------------------------------------------------
 
 
+async def _sleep_unless_cancelled(
+    delay_s: float, cancelled: Callable[[], bool], *, tick_s: float = 1.0
+) -> None:
+    """Sleep ``delay_s`` seconds, waking early once ``cancelled()`` turns True."""
+    loop = asyncio.get_running_loop()
+    end = loop.time() + delay_s
+    while (remaining := end - loop.time()) > 0:
+        if cancelled():
+            return
+        await asyncio.sleep(min(tick_s, remaining))
+
+
 async def detect(
     transcript: Transcript,
     provider: LLMProvider,
@@ -149,8 +161,14 @@ async def detect(
     silences: list[Silence] | None = None,
     on_progress: Callable[[float], None] | None = None,
     concurrency: int | None = None,
+    is_cancelled: Callable[[], bool] | None = None,
 ) -> list[Clip]:
     """Run detection across the whole transcript and return ranked clips.
+
+    ``is_cancelled`` is polled before every provider call and during rate-limit
+    backoff; once it returns True the remaining windows are skipped and ``[]`` is
+    returned, so the caller can raise its own cancellation. A call already in
+    flight is not interrupted.
 
     ``concurrency`` overrides the built-in default (3 for hosted, 1 for local).
     Set it to 1 for free-tier keys that enforce a strict requests-per-minute
@@ -169,6 +187,9 @@ async def detect(
         len(windows), provider.name, _concurrency,
     )
 
+    def cancelled() -> bool:
+        return is_cancelled is not None and is_cancelled()
+
     semaphore = asyncio.Semaphore(_concurrency)
     completed = 0
     failed_windows = 0
@@ -182,6 +203,8 @@ async def detect(
             last_exc: Exception | None = None
 
             for attempt in range(MAX_RETRIES):
+                if cancelled():
+                    return []
                 try:
                     result = await provider.detect_highlights(window, config)
                     candidates = result.clips
@@ -196,7 +219,7 @@ async def detect(
                             window.first_word, window.last_word,
                             attempt + 1, MAX_RETRIES, delay,
                         )
-                        await asyncio.sleep(delay)
+                        await _sleep_unless_cancelled(delay, cancelled)
                         continue
                     last_exc = exc
                     break
@@ -219,6 +242,8 @@ async def detect(
             return candidates
 
     results = await asyncio.gather(*(run_window(w) for w in windows))
+    if cancelled():
+        return []
     candidates = [c for group in results for c in group]
 
     if failed_windows > 0:
@@ -233,11 +258,12 @@ async def detect(
             )
 
     if not candidates:
-        raise HighlightError(
-            "No clips were found. This can mean the video genuinely has no "
-            "self-contained highlights, or that the model struggled with the "
-            "transcript — try a larger model or a different provider."
-        )
+        # A video with no self-contained highlights is a valid result, not a
+        # failure: the job finishes with zero clips instead of burning another
+        # LLM run on Retry. Provider outages are still caught by the
+        # failed-windows check above.
+        log.info("Providers proposed no candidates; finishing with zero clips.")
+        return []
 
     log.info("Providers proposed %d raw candidates.", len(candidates))
     return build_clips(transcript, candidates, config, job_id=job_id, silences=silences or [])

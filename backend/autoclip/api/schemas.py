@@ -88,6 +88,11 @@ class JobSettingsIn(BaseModel):
     crf: int | None = Field(default=None, ge=1, le=51)
     preset: str | None = None
     scan_only: bool | None = None
+    prompt_style: Literal[
+        "general", "interview", "tutorial", "sales", "comedy",
+        "keynote", "product-demo", "debate", "storytime",
+    ] | None = None
+    music_track: str | None = None
 
 
 class JobCreateIn(BaseModel):
@@ -187,6 +192,8 @@ class ClipOut(BaseModel):
         *,
         edit: models.ClipEdit | None = None,
         exports: list[models.Export] | None = None,
+        default_ratio: str = "9:16",
+        default_style: str = "bold_pop",
     ) -> ClipOut:
         return cls(
             id=clip.id,
@@ -203,8 +210,8 @@ class ClipOut(BaseModel):
             reason=clip.reason,
             status=clip.status,
             user_trimmed=clip.user_trimmed,
-            caption_style=edit.caption_style if edit else "bold_pop",
-            ratio=edit.ratio if edit else "9:16",
+            caption_style=edit.caption_style if edit else default_style,
+            ratio=edit.ratio if edit else default_ratio,
             exports=[ExportOut.of(e) for e in (exports or [])],
         )
 

@@ -171,6 +171,24 @@ def list_jobs(limit: int = 50, status: JobStatus | None = None) -> list[Job]:
     return [Job.from_row(r) for r in rows]
 
 
+def delete_job(job_id: str) -> bool:
+    """Delete a job row; transcripts, clips, edits and exports cascade with it."""
+    with connection() as conn:
+        return conn.execute("DELETE FROM jobs WHERE id = ?", (job_id,)).rowcount > 0
+
+
+def list_jobs_for_source(source_id: str) -> list[Job]:
+    with connection() as conn:
+        rows = conn.execute("SELECT * FROM jobs WHERE source_id = ?", (source_id,)).fetchall()
+    return [Job.from_row(r) for r in rows]
+
+
+def delete_source(source_id: str) -> bool:
+    """Delete a source row; its jobs (and everything under them) cascade."""
+    with connection() as conn:
+        return conn.execute("DELETE FROM sources WHERE id = ?", (source_id,)).rowcount > 0
+
+
 class _Unset:
     """Sentinel distinguishing "leave this alone" from "set this to NULL".
 
@@ -460,6 +478,26 @@ def update_export_status(
             """,
             (status, size_bytes, error, export_id),
         )
+
+
+def fail_interrupted_work() -> tuple[int, int]:
+    """Fail sources and exports left ``pending`` by a previous process.
+
+    Their background tasks died with the server and are never resumed, so
+    without this they stay pending forever and the UI polls them indefinitely.
+    Returns ``(sources_failed, exports_failed)``.
+    """
+    with connection() as conn:
+        sources = conn.execute(
+            "UPDATE sources SET ingest_status = 'failed', ingest_error = ? "
+            "WHERE ingest_status = 'pending'",
+            ("Download was interrupted by a server restart. Add the link again.",),
+        ).rowcount
+        exports = conn.execute(
+            "UPDATE exports SET status = 'failed', error = ? WHERE status = 'pending'",
+            ("Export was interrupted by a server restart. Export the clip again.",),
+        ).rowcount
+    return sources, exports
 
 
 def get_export(export_id: str) -> Export | None:

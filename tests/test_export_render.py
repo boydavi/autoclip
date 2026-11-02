@@ -174,6 +174,61 @@ class TestSingleSegmentRender:
         assert _frame_signature(with_captions, 2.5) != _frame_signature(without_captions, 2.5)
 
 
+class TestAudioOnlyRender:
+    @pytest.fixture(scope="class")
+    def audio_source(self, tmp_path_factory) -> Path:
+        path = tmp_path_factory.mktemp("audio") / "talk.wav"
+        subprocess.run(
+            [
+                ffmpeg.ffmpeg_path(), "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", f"sine=frequency=330:duration={SOURCE_DURATION}",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        return path
+
+    def _request(self, audio_source, destination, words, **kwargs):
+        return make_request(
+            audio_source, destination, CropPath(source_width=0, source_height=0), words,
+            has_video=False, **kwargs,
+        )
+
+    def test_renders_captions_on_a_generated_background(
+        self, audio_source, words, tmp_path
+    ) -> None:
+        destination = tmp_path / "audio.mp4"
+
+        export.export_clip(self._request(audio_source, destination, words), work_dir=tmp_path / "work")
+
+        info = ffmpeg.probe(destination)
+        assert (info.width, info.height) == (1080, 1920)
+        assert info.has_audio
+        assert info.duration_s == pytest.approx(5.0, abs=0.35)
+
+    def test_renders_with_music_mixed_under_the_speech(
+        self, audio_source, words, tmp_path
+    ) -> None:
+        destination = tmp_path / "audio_music.mp4"
+        request = self._request(audio_source, destination, words, music_track=audio_source)
+
+        export.export_clip(
+            request, work_dir=tmp_path / "work", settings=ExportSettings(music_enabled=True)
+        )
+
+        info = ffmpeg.probe(destination)
+        assert (info.width, info.height) == (1080, 1920)
+        assert info.has_audio
+        assert info.duration_s == pytest.approx(5.0, abs=0.35)
+
+    def test_background_input_is_required(self, audio_source, words, tmp_path) -> None:
+        request = self._request(audio_source, tmp_path / "x.mp4", words)
+
+        with pytest.raises(export.ExportError):
+            export.build_video_filtergraph(request, subtitle_name=None)
+
+
 class TestMultiSegmentRender:
     def test_concatenated_segments_render(self, source_video, words, tmp_path) -> None:
         crop_w, crop_h = 404, 720

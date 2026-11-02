@@ -11,6 +11,7 @@ from pathlib import Path
 from fastapi import APIRouter, BackgroundTasks, File, HTTPException, UploadFile
 from fastapi.responses import JSONResponse
 
+from .. import cleanup
 from ..config import load as load_settings
 from ..db import store
 from ..db.models import Source, new_id, utcnow
@@ -42,6 +43,33 @@ async def get_source(source_id: str) -> SourceOut:
     if source is None:
         raise HTTPException(status_code=404, detail="Source not found.")
     return SourceOut.of(source)
+
+
+@router.delete("/{source_id}", status_code=204)
+async def delete_source(source_id: str) -> None:
+    """Delete a source, every job made from it, and all their files.
+
+    Refused while the source is still downloading or any of its jobs is queued or
+    running, so a worker never has its input removed mid-run.
+    """
+    source = await asyncio.to_thread(store.get_source, source_id)
+    if source is None:
+        raise HTTPException(status_code=404, detail="Source not found.")
+    if source.ingest_status == "pending":
+        raise HTTPException(status_code=409, detail="Source is still downloading.")
+
+    jobs = await asyncio.to_thread(store.list_jobs_for_source, source_id)
+    active = [job for job in jobs if job.status in ("queued", "running")]
+    if active:
+        raise HTTPException(
+            status_code=409,
+            detail=f"{len(active)} job(s) for this source are still active. Cancel them first.",
+        )
+
+    await asyncio.to_thread(store.delete_source, source_id)
+    for job in jobs:
+        await asyncio.to_thread(cleanup.remove_job_files, job.id)
+    await asyncio.to_thread(cleanup.remove_source_files, source_id, source.path)
 
 
 @router.post("/youtube", status_code=202)

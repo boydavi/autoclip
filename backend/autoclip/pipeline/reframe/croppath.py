@@ -16,7 +16,7 @@ from __future__ import annotations
 
 import json
 import logging
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -96,6 +96,10 @@ class CropPath:
     source_width: int
     source_height: int
     segments: list[CropSegment] = field(default_factory=list)
+    #: Source-timeline second where clip-relative t=0 sat when the path was
+    #: computed. Lets a later trim shift the path instead of guessing; None for
+    #: paths cached before this field existed.
+    origin_start_s: float | None = None
 
     @property
     def duration_s(self) -> float:
@@ -105,6 +109,7 @@ class CropPath:
         return {
             "source_width": self.source_width,
             "source_height": self.source_height,
+            "origin_start_s": self.origin_start_s,
             "segments": [{**asdict(s), "strategy": s.strategy.value} for s in self.segments],
         }
 
@@ -129,6 +134,7 @@ class CropPath:
             source_width=data["source_width"],
             source_height=data["source_height"],
             segments=segments,
+            origin_start_s=data.get("origin_start_s"),
         )
 
     def save(self, path: Path) -> Path:
@@ -244,6 +250,63 @@ def decimate(
         if not deduped or frame.t > deduped[-1].t:
             deduped.append(frame)
     return deduped
+
+
+def _keyframe_at(keyframes: list[CropKeyframe], t: float) -> CropKeyframe:
+    """Linearly interpolated crop corner at ``t``, held flat outside the range."""
+    if t <= keyframes[0].t:
+        return CropKeyframe(t, keyframes[0].x, keyframes[0].y)
+    if t >= keyframes[-1].t:
+        return CropKeyframe(t, keyframes[-1].x, keyframes[-1].y)
+    for a, b in zip(keyframes, keyframes[1:], strict=False):
+        if a.t <= t <= b.t:
+            span = b.t - a.t
+            f = (t - a.t) / span if span > 0 else 0.0
+            return CropKeyframe(t, a.x + (b.x - a.x) * f, a.y + (b.y - a.y) * f)
+    return CropKeyframe(t, keyframes[-1].x, keyframes[-1].y)
+
+
+def retime_crop_path(path: CropPath, *, shift_s: float, duration_s: float) -> CropPath | None:
+    """Re-fit a crop path to a trimmed clip.
+
+    ``shift_s`` is the new clip start minus the start the path was built for
+    (positive when the head was trimmed, negative when extended). Segments move
+    by ``-shift_s`` and are clamped to ``[0, duration_s]``; tracked windows are
+    cut with interpolated edge keyframes so the framing at the new cut points
+    matches the original. If the new range runs past the analysed footage, the
+    first/last segment is held to cover it. Returns None when nothing overlaps.
+    """
+    segments: list[CropSegment] = []
+    for seg in path.segments:
+        start = seg.start_s - shift_s
+        end = seg.end_s - shift_s
+        lo, hi = max(0.0, start), min(duration_s, end)
+        if hi - lo < 1e-3:
+            continue
+        keyframes: list[CropKeyframe] = []
+        if seg.keyframes:
+            shifted = [CropKeyframe(k.t - shift_s, k.x, k.y) for k in seg.keyframes]
+            inner = [k for k in shifted if lo < k.t < hi]
+            keyframes = [_keyframe_at(shifted, lo), *inner, _keyframe_at(shifted, hi)]
+        segments.append(replace(seg, start_s=lo, end_s=hi, keyframes=keyframes))
+
+    if not segments:
+        return None
+
+    segments[0] = replace(segments[0], start_s=0.0)
+    segments[-1] = replace(segments[-1], end_s=duration_s)
+    for index in (0, -1):
+        seg = segments[index]
+        if seg.keyframes:
+            edge = seg.keyframes[0] if index == 0 else seg.keyframes[-1]
+            edge.t = seg.start_s if index == 0 else seg.end_s
+
+    return CropPath(
+        source_width=path.source_width,
+        source_height=path.source_height,
+        segments=segments,
+        origin_start_s=path.origin_start_s,
+    )
 
 
 def adapt_crop_path(

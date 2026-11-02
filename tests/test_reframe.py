@@ -24,6 +24,61 @@ from autoclip.pipeline.reframe.faces import FaceObservation
 from autoclip.pipeline.reframe.tracker import build_tracks
 
 
+class TestRetimeCropPath:
+    @staticmethod
+    def _tracked() -> croppath.CropPath:
+        # Original clip started at source t=100s and lasts 20s: a tracked pan
+        # from x=0 to x=200 over [0, 10], then a static shot over [10, 20].
+        return croppath.CropPath(
+            source_width=1920,
+            source_height=1080,
+            origin_start_s=100.0,
+            segments=[
+                croppath.CropSegment(
+                    0.0, 10.0, 608, 1080,
+                    keyframes=[croppath.CropKeyframe(0.0, 0.0, 0.0), croppath.CropKeyframe(10.0, 200.0, 0.0)],
+                ),
+                croppath.CropSegment(
+                    10.0, 20.0, 608, 1080, keyframes=[croppath.CropKeyframe(10.0, 500.0, 0.0)]
+                ),
+            ],
+        )
+
+    def test_head_trim_shifts_and_interpolates_the_cut_point(self) -> None:
+        path = croppath.retime_crop_path(self._tracked(), shift_s=5.0, duration_s=15.0)
+
+        assert path is not None
+        assert path.duration_s == 15.0
+        first = path.segments[0]
+        assert (first.start_s, first.end_s) == (0.0, 5.0)
+        assert first.keyframes[0].x == pytest.approx(100.0)  # halfway through the pan
+        assert first.keyframes[-1].x == pytest.approx(200.0)
+        assert first.keyframes[-1].t == pytest.approx(5.0)
+
+    def test_extending_past_the_analysed_range_holds_the_last_shot(self) -> None:
+        path = croppath.retime_crop_path(self._tracked(), shift_s=0.0, duration_s=30.0)
+
+        assert path is not None
+        assert path.duration_s == 30.0
+        assert path.segments[-1].keyframes[-1].t == pytest.approx(30.0)
+        assert path.segments[-1].keyframes[-1].x == pytest.approx(500.0)
+
+    def test_extending_before_the_start_holds_the_first_shot(self) -> None:
+        path = croppath.retime_crop_path(self._tracked(), shift_s=-4.0, duration_s=24.0)
+
+        assert path is not None
+        assert path.segments[0].start_s == 0.0
+        assert path.segments[0].keyframes[0].x == pytest.approx(0.0)
+
+    def test_origin_survives_a_save_round_trip(self, tmp_path) -> None:
+        saved = self._tracked().save(tmp_path / "crop.json")
+
+        assert croppath.CropPath.load(saved).origin_start_s == 100.0
+
+    def test_no_overlap_returns_none(self) -> None:
+        assert croppath.retime_crop_path(self._tracked(), shift_s=500.0, duration_s=10.0) is None
+
+
 class TestTargetCropSize:
     def test_landscape_to_vertical(self) -> None:
         # 1080 * 9/16 = 607.5, rounded to the nearest even width.

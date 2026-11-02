@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 
 from fastapi import APIRouter, HTTPException
 
@@ -15,6 +16,16 @@ from .schemas import ProviderStatusOut, SecretIn, SettingsIn, SettingsOut, Syste
 log = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/api", tags=["settings"])
+
+# Provider errors often echo the rejected key, usually partly masked. That text is
+# shown in the UI (and screenshots), so key-shaped tokens are hidden first.
+_KEY_AFTER_PHRASE = re.compile(r"(?i)(api[ _-]?key(?: provided)?\s*[:=]\s*)\S+")
+_KEY_SHAPED = re.compile(r"\b(?:sk|gsk|xai|pplx|AIza)[-_][A-Za-z0-9_\-*.]{4,}")
+
+
+def redact_secrets(text: str) -> str:
+    """Hide anything in *text* that looks like an API key."""
+    return _KEY_SHAPED.sub("[hidden]", _KEY_AFTER_PHRASE.sub(r"\1[hidden]", text))
 
 
 def _settings_out(settings: config.Settings) -> SettingsOut:
@@ -121,7 +132,7 @@ async def providers_status() -> list[ProviderStatusOut]:
         return ProviderStatusOut(
             name=name,
             available=status.available,
-            detail=status.detail,
+            detail=redact_secrets(status.detail),
             models=status.models,
             requires_key=provider_cls.requires_key,
             has_key=has_key,

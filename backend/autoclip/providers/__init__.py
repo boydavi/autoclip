@@ -80,14 +80,29 @@ def build_provider(name: str | None = None, settings: Settings | None = None) ->
     )
 
 
+STYLE_TO_PROMPT: dict[str, str] = {
+    "general": "highlight_v1",
+    "interview": "highlight_interview",
+    "tutorial": "highlight_tutorial",
+    "sales": "highlight_sales",
+    "comedy": "highlight_comedy",
+    "keynote": "highlight_keynote",
+    "product-demo": "highlight_product_demo",
+    "debate": "highlight_debate",
+    "storytime": "highlight_storytime",
+}
+
+
 def detection_config(settings: Settings | None = None) -> DetectionConfig:
     """Build a :class:`DetectionConfig` from user settings."""
     from ..config import load
 
     settings = settings if settings is not None else load()
+    prompt_version = STYLE_TO_PROMPT.get(settings.clips.prompt_style, "highlight_v1")
     return DetectionConfig(
         min_duration_s=settings.clips.min_duration_s,
         max_duration_s=settings.clips.max_duration_s,
         max_clips=settings.clips.max_clips,
         language=settings.whisper.language,
+        prompt_version=prompt_version,
     )

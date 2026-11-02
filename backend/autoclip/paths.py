@@ -70,6 +70,11 @@ def exports_dir() -> Path:
     return root() / "exports"
 
 
+def music_dir() -> Path:
+    """Directory where users drop background music tracks (.mp3, .m4a, etc.)."""
+    return root() / "music"
+
+
 DB_NAME = "autoclip.db"
 LEGACY_DB_NAME = "clipforge.db"
 

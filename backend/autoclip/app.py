@@ -21,6 +21,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 
 from . import __version__, db, paths
 from .api import api_router
+from .db import store
 from .jobs.events import broker
 from .jobs.queue import queue
 
@@ -76,6 +77,14 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
 
     paths.ensure_layout()
     db.init()
+
+    interrupted_sources, interrupted_exports = store.fail_interrupted_work()
+    if interrupted_sources or interrupted_exports:
+        log.warning(
+            "Marked %d pending source(s) and %d pending export(s) as failed after restart.",
+            interrupted_sources,
+            interrupted_exports,
+        )
 
     broker.bind_loop(asyncio.get_running_loop())
 

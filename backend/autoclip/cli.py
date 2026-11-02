@@ -22,6 +22,9 @@ from rich.table import Table
 from rich.text import Text
 
 from . import __version__, config, paths, system
+from .pipeline.export import MUSIC_FORMATS
+from .providers import STYLE_TO_PROMPT
+from .providers.base import PROMPT_DIR
 
 app = typer.Typer(
     name="autoclip",
@@ -317,6 +320,66 @@ def doctor() -> None:
 
     console.print()
     console.print(store_table)
+
+    # --- Content -----------------------------------------------------------
+    content_table = Table(
+        title="Content", show_header=True, header_style="bold", title_justify="left"
+    )
+    content_table.add_column("Check")
+    content_table.add_column("Status", width=6)
+    content_table.add_column("Detail")
+
+    # Music folder
+    music_dir = paths.music_dir()
+    if music_dir.is_dir():
+        tracks = [p for p in music_dir.iterdir() if p.suffix.lower() in MUSIC_FORMATS]
+        if tracks:
+            content_table.add_row(
+                "Music folder",
+                OK,
+                f"{len(tracks)} track{'s' if len(tracks) != 1 else ''} — {music_dir}",
+            )
+        else:
+            content_table.add_row(
+                "Music folder",
+                WARN,
+                f"exists but empty — add .mp3/.m4a/.wav/.flac files to {music_dir}",
+            )
+            if settings.export.music_enabled:
+                remediation.append(
+                    f"[cyan]music_enabled[/cyan] is on but {music_dir} has no audio files. "
+                    "Add tracks (mp3/m4a/wav/flac) or disable music in Settings."
+                )
+    else:
+        detail = str(music_dir)
+        if settings.export.music_enabled:
+            content_table.add_row("Music folder", WARN, f"not found — {detail}")
+            remediation.append(
+                f"[cyan]music_enabled[/cyan] is on but the music folder does not exist: "
+                f"{music_dir}. Create it and add audio tracks, or disable music in Settings."
+            )
+        else:
+            content_table.add_row("Music folder", WARN, f"not created yet — {detail}")
+
+    # Prompt files
+    missing_prompts: list[str] = []
+    for style, stem in sorted(STYLE_TO_PROMPT.items()):
+        prompt_path = PROMPT_DIR / f"{stem}.txt"
+        if prompt_path.exists():
+            content_table.add_row(f"  prompt: {style}", OK, stem)
+        else:
+            content_table.add_row(f"  prompt: {style}", FAIL, f"missing — {prompt_path}")
+            missing_prompts.append(stem)
+
+    if missing_prompts:
+        remediation.append(
+            "One or more prompt files are missing from [cyan]autoclip/prompts/[/cyan]: "
+            + ", ".join(missing_prompts)
+            + ". The pipeline will raise ProviderError when that style is selected."
+        )
+
+    console.print()
+    console.print(content_table)
 
     # --- Verdict -----------------------------------------------------------
     console.print()

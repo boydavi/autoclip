@@ -10,13 +10,12 @@ from fastapi import APIRouter, BackgroundTasks, HTTPException
 from fastapi.responses import FileResponse
 
 from .. import paths
-from ..config import load as load_settings
 from ..db import store
 from ..db.models import Export, new_id
 from ..pipeline import captions as captions_module
 from ..pipeline import export as export_module
-from ..pipeline.reframe.croppath import CropPath, adapt_crop_path, centre_crop
-from ..pipeline.runner import JobWorkspace
+from ..pipeline.reframe.croppath import CropPath, adapt_crop_path, centre_crop, retime_crop_path
+from ..pipeline.runner import JobWorkspace, _job_settings
 from ..pipeline.transcript import Transcript, Word
 from .schemas import (
     CaptionPatchIn,
@@ -33,10 +32,19 @@ log = logging.getLogger(__name__)
 router = APIRouter(prefix="/api", tags=["clips"])
 
 
-def _clip_out(clip) -> ClipOut:
+def _export_defaults(job) -> tuple[str, str]:
+    """(ratio, caption style) the job was created with, for clips with no edit yet."""
+    export = ((job.settings if job else None) or {}).get("export") or {}
+    return export.get("ratio", "9:16"), export.get("caption_style", "bold_pop")
+
+
+def _clip_out(clip, job=None) -> ClipOut:
     edit = store.get_clip_edit(clip.id)
     exports = store.list_exports(clip.id)
-    return ClipOut.of(clip, edit=edit, exports=exports)
+    ratio, style = _export_defaults(job if job is not None else store.get_job(clip.job_id))
+    return ClipOut.of(
+        clip, edit=edit, exports=exports, default_ratio=ratio, default_style=style
+    )
 
 
 async def list_clips_for_job(job_id: str) -> list[ClipOut]:
@@ -44,7 +52,7 @@ async def list_clips_for_job(job_id: str) -> list[ClipOut]:
     if job is None:
         raise HTTPException(status_code=404, detail="Job not found.")
     clips = await asyncio.to_thread(store.list_clips, job_id)
-    return [await asyncio.to_thread(_clip_out, clip) for clip in clips]
+    return [await asyncio.to_thread(_clip_out, clip, job) for clip in clips]
 
 
 @router.get("/clips/{clip_id}", response_model=ClipOut)
@@ -94,7 +102,10 @@ async def clip_crop_path(clip_id: str) -> dict:
         # client falls back to a centre crop.
         raise HTTPException(status_code=404, detail="No crop path for this clip yet.")
 
-    return (await asyncio.to_thread(CropPath.load, cached)).to_dict()
+    fitted = _fit_cached_crop(clip, await asyncio.to_thread(CropPath.load, cached))
+    if fitted is None:
+        raise HTTPException(status_code=404, detail="No crop path for the trimmed range.")
+    return fitted.to_dict()
 
 
 @router.patch("/clips/{clip_id}", response_model=ClipOut)
@@ -151,6 +162,9 @@ async def patch_captions(clip_id: str, payload: CaptionPatchIn) -> ClipOut:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
     existing = await asyncio.to_thread(store.get_clip_edit, clip_id)
+    default_ratio, default_style = _export_defaults(
+        await asyncio.to_thread(store.get_job, clip.job_id)
+    )
     from ..db.models import ClipEdit
 
     edit = ClipEdit(
@@ -160,8 +174,9 @@ async def patch_captions(clip_id: str, payload: CaptionPatchIn) -> ClipOut:
             if payload.words is not None
             else (existing.edited_words if existing else None)
         ),
-        caption_style=payload.caption_style or (existing.caption_style if existing else "bold_pop"),
-        ratio=payload.ratio or (existing.ratio if existing else "9:16"),
+        caption_style=payload.caption_style
+        or (existing.caption_style if existing else default_style),
+        ratio=payload.ratio or (existing.ratio if existing else default_ratio),
     )
     await asyncio.to_thread(store.upsert_clip_edit, edit)
 
@@ -198,7 +213,8 @@ async def export_clip(
         for w in await clip_words(clip_id)
     ]
 
-    settings = load_settings()
+    # The job's own snapshot, so a re-export keeps its loudness, quality and music.
+    settings = _job_settings(job)
     settings.export.write_srt = payload.write_srt
 
     workspace = JobWorkspace(clip.job_id)
@@ -207,7 +223,9 @@ async def export_clip(
     destination = (
         paths.exports_dir()
         / clip.job_id
-        / export_module.output_filename(clip.title or f"clip-{clip.rank}", payload.ratio)
+        / export_module.output_filename(
+            clip.title or f"clip-{clip.rank}", payload.ratio, rank=clip.rank
+        )
     )
 
     export_request = export_module.ExportRequest(
@@ -219,6 +237,10 @@ async def export_clip(
         words=words,
         style=style,
         ratio=payload.ratio,
+        music_track=export_module.resolve_music_track(
+            settings.export, paths.music_dir(), rng_seed=clip.rank
+        ),
+        has_video=source.has_video,
     )
 
     record = Export(
@@ -350,6 +372,23 @@ def _load_transcript(job_id: str) -> Transcript:
     return Transcript.load(workspace.transcript)
 
 
+def _fit_cached_crop(clip, cached: CropPath) -> CropPath | None:
+    """The cached crop path fitted to the clip's current (possibly trimmed) span.
+
+    None when the clip was trimmed but the path predates ``origin_start_s``, so
+    its offset is unknown, or when the trim no longer overlaps the analysed range.
+    """
+    if not clip.user_trimmed:
+        return cached
+    if cached.origin_start_s is None:
+        return None
+    return retime_crop_path(
+        cached,
+        shift_s=clip.start_s - cached.origin_start_s,
+        duration_s=clip.end_s - clip.start_s,
+    )
+
+
 def _crop_path_for(workspace: JobWorkspace, clip, source, ratio: str) -> CropPath:
     """Return a crop path for the requested ratio, preserving face tracking.
 
@@ -363,14 +402,16 @@ def _crop_path_for(workspace: JobWorkspace, clip, source, ratio: str) -> CropPat
     aspect = {"9:16": (9, 16), "1:1": (1, 1), "16:9": (16, 9)}[ratio]
 
     if cached.exists():
-        existing = CropPath.load(cached)
-        job = store.get_job(clip.job_id)
-        original_ratio = "9:16"
-        if job and job.settings:
-            original_ratio = (job.settings.get("export") or {}).get("ratio", "9:16")
-        if original_ratio == ratio:
-            return existing
-        return adapt_crop_path(existing, aspect_w=aspect[0], aspect_h=aspect[1])
+        existing = _fit_cached_crop(clip, CropPath.load(cached))
+        if existing is not None:
+            job = store.get_job(clip.job_id)
+            original_ratio = "9:16"
+            if job and job.settings:
+                original_ratio = (job.settings.get("export") or {}).get("ratio", "9:16")
+            if original_ratio == ratio:
+                return existing
+            return adapt_crop_path(existing, aspect_w=aspect[0], aspect_h=aspect[1])
+        log.warning("Crop path for trimmed clip %s cannot be retimed; centre-cropping.", clip.id)
 
     return centre_crop(
         source.width or 1920,

@@ -31,6 +31,9 @@ QUEUE_SIZE = 64
 #: don't time the connection out.
 HEARTBEAT_S = 15.0
 
+#: Events that end a job's stream; these are never dropped for a slow subscriber.
+TERMINAL_EVENTS = frozenset({"done", "failed", "cancelled"})
+
 
 @dataclass
 class Event:
@@ -77,6 +80,13 @@ class EventBroker:
             try:
                 queue.put_nowait(event)
             except asyncio.QueueFull:
+                if event.type in TERMINAL_EVENTS:
+                    # The final event must arrive or the UI never learns the job
+                    # ended. Evict the oldest queued frame to make room for it.
+                    with contextlib.suppress(asyncio.QueueEmpty, asyncio.QueueFull):
+                        queue.get_nowait()
+                        queue.put_nowait(event)
+                    continue
                 # The client isn't keeping up. Losing an intermediate progress
                 # frame is harmless; the next one carries the current state.
                 log.debug("Dropped an event for a slow subscriber on job %s.", event.job_id)

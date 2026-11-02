@@ -20,6 +20,38 @@ def make_transcript(sentences: list[list[str]], *, word_duration: float = 0.5) -
     return Transcript(words=words)
 
 
+def test_detect_with_no_candidates_returns_empty_instead_of_failing() -> None:
+    import asyncio
+
+    from autoclip.pipeline import highlights
+    from autoclip.providers import DetectionConfig
+    from autoclip.providers.base import ClipCandidates, LLMProvider, ProviderStatus
+
+    class EmptyProvider(LLMProvider):
+        name = "empty"
+        requires_key = False
+
+        def __init__(self) -> None:
+            super().__init__("empty-model")
+
+        async def _complete(self, system, user, config) -> str:
+            raise AssertionError("unused")
+
+        async def health_check(self) -> ProviderStatus:
+            return ProviderStatus(name=self.name, available=True)
+
+        async def detect_highlights(self, window, config) -> ClipCandidates:
+            return ClipCandidates.model_validate({"clips": []})
+
+    transcript = make_transcript([[f"w{s}{i}" for i in range(10)] for s in range(10)])
+
+    clips = asyncio.run(
+        highlights.detect(transcript, EmptyProvider(), DetectionConfig(), job_id="job-1")
+    )
+
+    assert clips == []
+
+
 @pytest.fixture
 def transcript() -> Transcript:
     # Ten sentences of ten words: 100 words, 0.5s each, 50 seconds total.

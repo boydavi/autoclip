@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { Link, useParams } from 'react-router-dom'
 
 import {
   api,
   formatBytes,
+  waitForExport,
   formatDuration,
   type CaptionStyle,
   type Clip,
@@ -30,6 +31,14 @@ export function Review() {
   const [savingWords, setSavingWords] = useState(false)
   const [exporting, setExporting] = useState<Set<string>>(new Set())
   const [error, setError] = useState<Error | null>(null)
+  const alive = useRef(true)
+
+  useEffect(() => {
+    alive.current = true
+    return () => {
+      alive.current = false
+    }
+  }, [])
 
   useEffect(() => {
     if (!jobId) return
@@ -118,8 +127,9 @@ export function Review() {
     setExporting((current) => new Set(current).add(clip.id))
     setError(null)
     try {
-      await api.exportClip(clip.id, clip.ratio, clip.caption_style)
-      patchClip(await api.getClip(clip.id))
+      const started = await api.exportClip(clip.id, clip.ratio, clip.caption_style)
+      await waitForExport(started, () => !alive.current)
+      if (alive.current) patchClip(await api.getClip(clip.id))
     } catch (err) {
       setError(err as Error)
     } finally {
@@ -313,15 +323,25 @@ export function Review() {
                           key={record.id}
                           className="flex items-baseline justify-between gap-3 text-xs"
                         >
-                          <a
-                            href={record.download_url}
-                            download
-                            className="truncate text-sodium-500 underline underline-offset-4"
-                          >
-                            {record.ratio} · {record.style}
-                          </a>
+                          {record.status === 'done' ? (
+                            <a
+                              href={record.download_url}
+                              download
+                              className="truncate text-sodium-500 underline underline-offset-4"
+                            >
+                              {record.ratio} · {record.style}
+                            </a>
+                          ) : (
+                            <span
+                              className={`truncate ${record.status === 'failed' ? 'text-signal-bad' : 'text-ink-400'}`}
+                              title={record.error ?? undefined}
+                            >
+                              {record.ratio} · {record.style} ·{' '}
+                              {record.status === 'failed' ? 'failed' : 'rendering…'}
+                            </span>
+                          )}
                           <span className="numeric shrink-0 text-ink-600">
-                            {formatBytes(record.size_bytes)}
+                            {record.status === 'done' ? formatBytes(record.size_bytes) : ''}
                           </span>
                         </li>
                       ))}
@@ -384,7 +404,7 @@ function ClipRow({
         <div className="mt-1 flex items-baseline gap-3">
           <span className="numeric text-xs text-ink-500">{formatDuration(clip.duration_s)}</span>
           {clip.user_trimmed && <span className="text-xs text-ink-600">trimmed</span>}
-          {clip.exports.length > 0 && (
+          {clip.exports.some((record) => record.status === 'done') && (
             <span className="text-xs text-signal-good">exported</span>
           )}
 

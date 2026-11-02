@@ -1,19 +1,39 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 
-import { api, type ProviderStatus, type Settings as SettingsData, type SystemStatus } from '../api'
+import {
+  api,
+  formatBytes,
+  type MusicTrack,
+  type ProviderStatus,
+  type Settings as SettingsData,
+  type SystemStatus,
+} from '../api'
 import { ErrorNote } from '../components/ErrorNote'
 
 const SECRET_LABELS: Record<string, string> = {
   anthropic: 'Anthropic API key',
   openai: 'OpenAI-compatible API key',
   gemini: 'Google Gemini API key',
+  groq: 'Groq API key (clip selection and Groq transcription)',
   huggingface_token: 'HuggingFace token',
 }
+
+const X264_PRESETS = [
+  'ultrafast',
+  'superfast',
+  'veryfast',
+  'faster',
+  'fast',
+  'medium',
+  'slow',
+  'veryslow',
+]
 
 export function Settings() {
   const [settings, setSettings] = useState<SettingsData | null>(null)
   const [providers, setProviders] = useState<ProviderStatus[]>([])
   const [system, setSystem] = useState<SystemStatus | null>(null)
+  const [tracks, setTracks] = useState<MusicTrack[]>([])
   const [error, setError] = useState<Error | null>(null)
   const [saved, setSaved] = useState(false)
 
@@ -21,6 +41,7 @@ export function Settings() {
     void api.getSettings().then(setSettings).catch((e) => setError(e as Error))
     void api.providerStatus().then(setProviders).catch(() => undefined)
     void api.system().then(setSystem).catch(() => undefined)
+    void api.listMusicTracks().then(setTracks).catch(() => undefined)
   }
 
   useEffect(reload, [])
@@ -129,6 +150,28 @@ export function Settings() {
               })
             }
           />
+          <Field
+            label="Parallel requests"
+            hint="Leave empty for the default. Use 1 on rate-limited free-tier keys."
+            value={String(settings.providers[settings.active_provider]?.concurrency ?? '')}
+            placeholder="auto"
+            onCommit={(value) => {
+              const trimmed = value.trim()
+              const parsed = Number.parseInt(trimmed, 10)
+              if (trimmed !== '' && (Number.isNaN(parsed) || parsed < 1)) {
+                setError(new Error('Parallel requests must be a whole number of 1 or more.'))
+                return
+              }
+              void patch({
+                providers: {
+                  [settings.active_provider]: {
+                    ...settings.providers[settings.active_provider],
+                    concurrency: trimmed === '' ? null : parsed,
+                  },
+                },
+              })
+            }}
+          />
         </div>
       </Section>
 
@@ -150,11 +193,38 @@ export function Settings() {
       <Section title="Transcription">
         <div className="grid gap-5 sm:grid-cols-2">
           <Select
-            label="Whisper model"
-            value={settings.whisper.model}
-            onChange={(value) => patch({ whisper: { ...settings.whisper, model: value } })}
-            options={['tiny', 'base', 'small', 'medium', 'large-v3']}
+            label="Engine"
+            hint={
+              settings.whisper.provider === 'groq'
+                ? 'Audio is sent to Groq for transcription. Fast, billed per hour of audio.'
+                : 'Runs on this machine. Private and free.'
+            }
+            value={settings.whisper.provider}
+            onChange={(value) =>
+              patch({ whisper: { ...settings.whisper, provider: value as 'local' | 'groq' } })
+            }
+            options={['local', 'groq']}
+            labels={{ local: 'Local (this machine)', groq: 'Groq cloud' }}
           />
+          {settings.whisper.provider === 'groq' ? (
+            <Select
+              label="Groq model"
+              value={settings.whisper.groq_model}
+              onChange={(value) => patch({ whisper: { ...settings.whisper, groq_model: value } })}
+              options={['whisper-large-v3-turbo', 'whisper-large-v3']}
+              labels={{
+                'whisper-large-v3-turbo': 'large-v3-turbo — fastest, cheapest',
+                'whisper-large-v3': 'large-v3 — most accurate',
+              }}
+            />
+          ) : (
+            <Select
+              label="Whisper model"
+              value={settings.whisper.model}
+              onChange={(value) => patch({ whisper: { ...settings.whisper, model: value } })}
+              options={['tiny', 'base', 'small', 'medium', 'large-v3']}
+            />
+          )}
           <Field
             label="Language"
             hint="Leave empty to detect automatically."
@@ -163,6 +233,13 @@ export function Settings() {
             onCommit={(value) => patch({ whisper: { ...settings.whisper, language: value } })}
           />
         </div>
+
+        {settings.whisper.provider === 'groq' && !settings.keys_present.groq && (
+          <p className="mt-5 border-l-2 border-sodium-600 pl-4 text-sm text-ink-300">
+            Groq transcription needs a Groq API key. Add it under Keys above, or switch the
+            engine back to Local — otherwise jobs will fail at the transcription step.
+          </p>
+        )}
 
         <label className="mt-5 flex items-start gap-3 text-sm text-ink-200">
           <input
@@ -219,6 +296,24 @@ export function Settings() {
             labels={{ '': 'None' }}
           />
         </div>
+
+        <label className="mt-5 flex items-start gap-3 text-sm text-ink-200">
+          <input
+            type="checkbox"
+            checked={settings.ingest.prefer_youtube_captions}
+            onChange={(e) =>
+              patch({ ingest: { ...settings.ingest, prefer_youtube_captions: e.target.checked } })
+            }
+            className="mt-0.5 size-4 accent-sodium-500"
+          />
+          <span>
+            Use YouTube&apos;s own captions when available
+            <span className="mt-1 block text-xs text-ink-500">
+              Skips transcription for videos that already have captions. Faster and free, but
+              less accurate than Whisper and without speaker labels.
+            </span>
+          </span>
+        </label>
       </Section>
 
       <Section title="Export">
@@ -234,7 +329,41 @@ export function Settings() {
             value={settings.export.loudness_lufs}
             onCommit={(value) => patch({ export: { ...settings.export, loudness_lufs: value } })}
           />
+          <NumberField
+            label="Quality (CRF, lower = better)"
+            value={settings.export.crf}
+            onCommit={(value) => {
+              if (!Number.isInteger(value) || value < 1 || value > 51) {
+                setError(new Error('Quality (CRF) must be a whole number from 1 to 51.'))
+                return
+              }
+              void patch({ export: { ...settings.export, crf: value } })
+            }}
+          />
+          <Select
+            label="Encoder speed (CPU)"
+            hint="Slower presets make smaller files at the same quality. GPU encoding ignores this."
+            value={settings.export.preset}
+            onChange={(value) => patch({ export: { ...settings.export, preset: value } })}
+            options={X264_PRESETS}
+          />
         </div>
+
+        <label className="mt-5 flex items-start gap-3 text-sm text-ink-200">
+          <input
+            type="checkbox"
+            checked={settings.export.scan_only}
+            onChange={(e) => patch({ export: { ...settings.export, scan_only: e.target.checked } })}
+            className="mt-0.5 size-4 accent-sodium-500"
+          />
+          <span>
+            Find clips only — don&apos;t render
+            <span className="mt-1 block text-xs text-ink-500">
+              Jobs stop after picking highlights. You review them first and export only the
+              ones you keep.
+            </span>
+          </span>
+        </label>
 
         <label className="mt-5 flex items-start gap-3 text-sm text-ink-200">
           <input
@@ -267,6 +396,47 @@ export function Settings() {
           />
           Also write an .srt sidecar
         </label>
+
+        <div className="mt-6 border-t border-ink-850 pt-5">
+          <label className="flex items-start gap-3 text-sm text-ink-200">
+            <input
+              type="checkbox"
+              checked={settings.export.music_enabled}
+              onChange={(e) =>
+                patch({ export: { ...settings.export, music_enabled: e.target.checked } })
+              }
+              className="mt-0.5 size-4 accent-sodium-500"
+            />
+            <span>
+              Mix background music under speech
+              <span className="mt-1 block text-xs text-ink-500">
+                Drop .mp3 / .m4a / .wav / .flac files into the{' '}
+                <code className="text-ink-300">music/</code> folder next to your data directory.
+                AutoClip picks one at random per clip.
+              </span>
+            </span>
+          </label>
+
+          {settings.export.music_enabled && (
+            <div className="mt-4 max-w-xs">
+              <MusicVolumeSlider
+                value={settings.export.music_volume}
+                onCommit={(v) => patch({ export: { ...settings.export, music_volume: v } })}
+              />
+            </div>
+          )}
+        </div>
+      </Section>
+
+      <Section
+        title="Music tracks"
+        note="Tracks mixed under speech when music is enabled. AutoClip picks one at random per clip."
+      >
+        <MusicPanel
+          tracks={tracks}
+          onChanged={() => void api.listMusicTracks().then(setTracks)}
+          onError={setError}
+        />
       </Section>
 
       {system && (
@@ -410,6 +580,122 @@ function Select({
         ))}
       </select>
       {hint && <span className="mt-1.5 block text-xs leading-snug text-ink-500">{hint}</span>}
+    </label>
+  )
+}
+
+function MusicPanel({
+  tracks,
+  onChanged,
+  onError,
+}: {
+  tracks: MusicTrack[]
+  onChanged: () => void
+  onError: (error: Error) => void
+}) {
+  const fileInput = useRef<HTMLInputElement>(null)
+  const [busy, setBusy] = useState(false)
+
+  const upload = async (file: File) => {
+    setBusy(true)
+    try {
+      await api.uploadMusicTrack(file)
+      onChanged()
+    } catch (err) {
+      onError(err as Error)
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  const remove = async (filename: string) => {
+    try {
+      await api.deleteMusicTrack(filename)
+      onChanged()
+    } catch (err) {
+      onError(err as Error)
+    }
+  }
+
+  return (
+    <div>
+      {tracks.length === 0 ? (
+        <p className="text-sm text-ink-500">No tracks loaded yet.</p>
+      ) : (
+        <ul className="divide-y divide-ink-850">
+          {tracks.map((track) => (
+            <li key={track.filename} className="flex items-baseline justify-between gap-4 py-2.5">
+              <span className="truncate text-sm text-ink-200">{track.filename}</span>
+              <div className="flex shrink-0 items-baseline gap-4">
+                <span className="numeric text-xs text-ink-600">{formatBytes(track.size_bytes)}</span>
+                <button
+                  onClick={() => void remove(track.filename)}
+                  className="btn btn-quiet text-xs"
+                >
+                  Remove
+                </button>
+              </div>
+            </li>
+          ))}
+        </ul>
+      )}
+
+      <input
+        ref={fileInput}
+        type="file"
+        className="hidden"
+        accept=".mp3,.m4a,.wav,.ogg,.flac,.aac,audio/*"
+        onChange={(e) => {
+          const file = e.target.files?.[0]
+          if (file) void upload(file)
+          e.target.value = ''
+        }}
+      />
+      <button
+        type="button"
+        onClick={() => fileInput.current?.click()}
+        disabled={busy}
+        className="btn btn-ghost mt-4"
+      >
+        {busy ? 'Uploading…' : '+ Add track'}
+      </button>
+    </div>
+  )
+}
+
+function MusicVolumeSlider({
+  value,
+  onCommit,
+}: {
+  value: number
+  onCommit: (value: number) => void
+}) {
+  const [draft, setDraft] = useState(value)
+  useEffect(() => setDraft(value), [value])
+  const pct = Math.round(draft * 100)
+
+  return (
+    <label className="block">
+      <span className="eyebrow flex justify-between">
+        <span>Music volume</span>
+        <span className="numeric text-ink-400">{pct}%</span>
+      </span>
+      <input
+        type="range"
+        className="mt-2 w-full accent-sodium-500"
+        min={0}
+        max={0.5}
+        step={0.01}
+        value={draft}
+        onChange={(e) => setDraft(Number(e.target.value))}
+        onMouseUp={() => draft !== value && onCommit(draft)}
+        onTouchEnd={() => draft !== value && onCommit(draft)}
+        onKeyUp={() => draft !== value && onCommit(draft)}
+      />
+      <div className="mt-1 flex justify-between text-xs text-ink-600">
+        <span>silent</span>
+        <span>50%</span>
+      </div>
     </label>
   )
 }

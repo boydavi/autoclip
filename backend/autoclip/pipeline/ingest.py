@@ -126,17 +126,26 @@ def _validate_ssrf_safe(url: str) -> None:
     for _family, _type, _proto, _canonname, sockaddr in results:
         ip_str = sockaddr[0]
         try:
-            addr = ipaddress.ip_address(ip_str)
+            addr: ipaddress.IPv4Address | ipaddress.IPv6Address = ipaddress.ip_address(ip_str)
         except ValueError:
-            continue
-        if (
-            addr.is_private
-            or addr.is_loopback
-            or addr.is_link_local
-            or addr.is_multicast
-            or addr.is_reserved
-            or addr.is_unspecified
-        ):
+            # Unparseable address — reject rather than skip to avoid bypasses.
+            raise IngestError(
+                "URL resolved to an address that could not be validated.",
+                hint="This is a safety check; the URL may be pointing at an unusual host.",
+            )
+
+        # Unwrap IPv4-mapped IPv6 (::ffff:192.168.1.1) and 6to4 addresses so
+        # the underlying IPv4 address is what we check. Without this, private
+        # ranges can be reached via their mapped IPv6 representation.
+        if isinstance(addr, ipaddress.IPv6Address):
+            if addr.ipv4_mapped is not None:
+                addr = addr.ipv4_mapped
+            elif addr.sixtofour is not None:
+                addr = addr.sixtofour
+
+        # Require a globally routable address. This is stricter and more
+        # complete than enumerating private/loopback/link-local individually.
+        if not addr.is_global:
             raise IngestError(
                 "URL resolves to a private or reserved network address.",
                 hint=(

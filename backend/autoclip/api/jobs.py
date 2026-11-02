@@ -8,11 +8,13 @@ import logging
 from fastapi import APIRouter, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 
+from .. import cleanup
 from ..config import load as load_settings
 from ..db import store
 from ..db.models import Job, new_id
 from ..jobs.events import HEARTBEAT_S, broker
 from ..jobs.queue import queue
+from ..providers import PROVIDERS
 from .schemas import JobCreateIn, JobOut, JobSettingsIn
 
 log = logging.getLogger(__name__)
@@ -48,6 +50,11 @@ def _apply_overrides(settings, overrides: JobSettingsIn):
         merged.export.preset = overrides.preset
     if overrides.scan_only is not None:
         merged.export.scan_only = overrides.scan_only
+    if overrides.prompt_style:
+        merged.clips.prompt_style = overrides.prompt_style
+    if overrides.music_track is not None:
+        merged.export.music_enabled = True
+        merged.export.music_track = overrides.music_track
 
     return merged
 
@@ -57,6 +64,19 @@ async def create_job(payload: JobCreateIn) -> JobOut:
     source = await asyncio.to_thread(store.get_source, payload.source_id)
     if source is None:
         raise HTTPException(status_code=404, detail="Source not found.")
+    if source.ingest_status != "ready":
+        detail = (
+            source.ingest_error or "Source download failed."
+            if source.ingest_status == "failed"
+            else "Source is still downloading. Wait until it is ready."
+        )
+        raise HTTPException(status_code=409, detail=detail)
+
+    if payload.settings.provider and payload.settings.provider not in PROVIDERS:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Unknown provider. Available: {', '.join(PROVIDERS)}",
+        )
 
     settings = _apply_overrides(load_settings(), payload.settings)
     if settings.clips.min_duration_s >= settings.clips.max_duration_s:
@@ -64,11 +84,17 @@ async def create_job(payload: JobCreateIn) -> JobOut:
             status_code=400, detail="Minimum clip length must be below the maximum."
         )
 
+    # model_dump excludes fields marked Field(exclude=True) — music_track is one.
+    # Re-inject it so the job snapshot carries the per-job override to the runner.
+    settings_dict = settings.model_dump(mode="json")
+    if settings.export.music_track:
+        settings_dict.setdefault("export", {})["music_track"] = settings.export.music_track
+
     job = Job(
         id=new_id(),
         source_id=source.id,
         provider=settings.active_provider,
-        settings=settings.model_dump(mode="json"),
+        settings=settings_dict,
     )
     await asyncio.to_thread(store.create_job, job)
     queue.notify()
@@ -144,6 +170,25 @@ async def cancel_job(job_id: str) -> JobOut:
 
     updated = await asyncio.to_thread(store.get_job, job_id)
     return JobOut.of(updated or job)
+
+
+@router.delete("/{job_id}", status_code=204)
+async def delete_job(job_id: str) -> None:
+    """Delete a finished job with its clips, exports and working files.
+
+    The source video is kept (it may back other jobs); delete it separately via
+    ``DELETE /api/sources/{id}``.
+    """
+    job = await asyncio.to_thread(store.get_job, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Job not found.")
+    if job.status in ("queued", "running"):
+        raise HTTPException(
+            status_code=409, detail=f"Job is {job.status}. Cancel it before deleting."
+        )
+
+    await asyncio.to_thread(store.delete_job, job_id)
+    await asyncio.to_thread(cleanup.remove_job_files, job_id)
 
 
 @router.post("/{job_id}/retry", response_model=JobOut)

@@ -101,6 +101,30 @@ class JobWorkspace:
         return self.root / "captions"
 
 
+def transcript_matches_settings(row, whisper) -> bool:
+    """Whether a stored transcript can stand in for one made with *whisper*.
+
+    YouTube captions are always acceptable (the pipeline prefers them whenever
+    the files exist). Otherwise the engine and model must match, a requested
+    language must match, and requested diarization needs a diarized transcript.
+    A transcript that is merely *more* than asked for (diarized, auto language)
+    is fine.
+    """
+    if row.source == "youtube":
+        return True
+    if whisper.provider == "groq":
+        expected_source, expected_model = "groq", f"groq/{whisper.groq_model}"
+    else:
+        expected_source, expected_model = "whisper", whisper.model
+    if row.source != expected_source or row.model != expected_model:
+        return False
+    if whisper.language and row.language and whisper.language != row.language:
+        return False
+    if whisper.diarization and not row.has_diarization:
+        return False
+    return True
+
+
 def _job_settings(job: Job) -> Settings:
     """The settings snapshot taken when the job was created (with its per-job
     overrides), falling back to the saved global settings for old jobs."""
@@ -188,7 +212,9 @@ class PipelineRunner:
             transcript = self._stage_transcribe(audio)
             silences = self._load_or_detect_silences(audio)
             clips = await self._stage_highlights(transcript, silences)
-            if self.settings.export.scan_only:
+            if not clips:
+                log.info("Job %s found no clips; nothing to reframe or export.", self.job.id)
+            elif self.settings.export.scan_only:
                 log.info("Job %s is scan-only: %d clips found, skipping reframe/export.", self.job.id, len(clips))
             else:
                 crop_paths = self._stage_reframe(clips, transcript)
@@ -226,6 +252,10 @@ class PipelineRunner:
     def _stage_prepare(self) -> Path:
         stage = Stage.PREPARE
         self._check_cancelled()
+        if not self.source.path:
+            raise PipelineError(
+                "Source has no media file (download did not finish).", stage=stage
+            )
         source_path = Path(self.source.path)
 
         if not self.workspace.audio.exists() and not source_path.exists():
@@ -264,6 +294,15 @@ class PipelineRunner:
 
         # Checkpoint 2: transcript from an earlier job on the same source.
         cached_row = store.get_transcript_for_source(self.source.id)
+        if cached_row is not None and not transcript_matches_settings(
+            cached_row, self.settings.whisper
+        ):
+            log.info(
+                "Cached transcript for source %s was made with different Whisper settings; "
+                "re-transcribing.",
+                self.source.id,
+            )
+            cached_row = None
         if cached_row is not None:
             cached_path = Path(cached_row.json_path)
             if cached_path.exists():
@@ -380,7 +419,10 @@ class PipelineRunner:
             silences=silences,
             on_progress=self._stage_progress(stage),
             concurrency=self.settings.provider(provider_name).concurrency,
+            is_cancelled=self._is_cancelled,
         )
+        # detect() returns early once cancelled; don't persist its partial result.
+        self._check_cancelled()
 
         store.replace_clips(self.job.id, clips)
         self._finish_stage(stage)
@@ -419,6 +461,7 @@ class PipelineRunner:
                     transcript=transcript,
                     config=config,
                 )
+                crop_paths[clip.id].origin_start_s = clip.start_s
                 crop_paths[clip.id].save(cached)
 
             self._emit(stage, (index + 1) / len(clips), f"Reframing clip {index + 1}")
@@ -450,13 +493,42 @@ class PipelineRunner:
         destination_dir = paths.exports_dir() / self.job.id
         destination_dir.mkdir(parents=True, exist_ok=True)
 
+        export_settings = self.settings.export
+        music_enabled = export_settings.music_enabled
+        if music_enabled and export.resolve_music_track(export_settings, paths.music_dir()) is None:
+            log.warning(
+                "music_enabled=True but no audio files found in %s; exporting without music.",
+                paths.music_dir(),
+            )
+            music_enabled = False
+
         for index, clip in enumerate(clips):
             self._check_cancelled()
+
+            # A retry after a later clip failed must not render this one twice or
+            # leave a second Export row pointing at the same file.
+            if any(
+                record.status == "done"
+                and record.ratio == ratio
+                and record.style == style.key
+                and Path(record.path).exists()
+                for record in store.list_exports(clip.id)
+            ):
+                self._emit(stage, (index + 1) / len(clips), f"Clip {index + 1} already exported")
+                continue
 
             crop_path = crop_paths.get(clip.id) or self._fallback_crop_path(clip, ratio)
             words = transcript.slice(clip.start_word, clip.end_word)
             destination = destination_dir / export.output_filename(
-                clip.title or f"clip-{clip.rank}", ratio
+                clip.title or f"clip-{clip.rank}", ratio, rank=clip.rank
+            )
+
+            music_track = (
+                export.resolve_music_track(
+                    export_settings, paths.music_dir(), rng_seed=clip.rank
+                )
+                if music_enabled
+                else None
             )
 
             request = export.ExportRequest(
@@ -468,6 +540,8 @@ class PipelineRunner:
                 words=words,
                 style=style,
                 ratio=ratio,
+                music_track=music_track,
+                has_video=self.source.has_video,
             )
 
             def clip_progress(fraction: float, i: int = index) -> None:

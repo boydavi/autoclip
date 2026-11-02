@@ -78,6 +78,7 @@ class ClipSettings(BaseModel):
     min_duration_s: float = 20.0
     max_duration_s: float = 90.0
     max_clips: int = 10
+    prompt_style: str = "general"
 
 
 class IngestSettings(BaseModel):
@@ -105,6 +106,16 @@ class ExportSettings(BaseModel):
     write_srt: bool = False
     #: Stop after highlight detection: clips get timestamps but no reframe/render.
     scan_only: bool = False
+    #: Mix a background music track from <root>/music/ under the speech.
+    music_enabled: bool = False
+    #: Music volume relative to the speech track. 0.12 = 12 % (-18 dB) is a
+    #: typical "bed" level that stays audible without competing with speech.
+    music_volume: float = 0.12
+    #: Per-job override: filename of a specific track in the music dir.
+    #: None = pick at random (default behaviour).
+    #: exclude=True: transient — never written to settings.json or returned by
+    #: GET /api/settings, so a read-modify-write PUT cannot accidentally persist it.
+    music_track: str | None = Field(default=None, exclude=True)
 
 
 class Settings(BaseModel):

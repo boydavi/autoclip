@@ -80,6 +80,11 @@ def failing_keyring(monkeypatch: pytest.MonkeyPatch) -> FakeKeyring:
     Distinct from `no_keyring`: this is the machine where a backend exists and
     is broken, which must degrade to the file fallback rather than propagate.
     """
+    # Clear any real AUTOCLIP_*_KEY env vars so the shell environment does not
+    # shadow the test values written to the fallback store.
+    for provider in config.KEYED_PROVIDERS:
+        monkeypatch.delenv(f"AUTOCLIP_{provider.upper()}_KEY", raising=False)
+
     kr = FakeKeyring(failing=True)
     monkeypatch.setattr(config, "_keyring", lambda: kr)
     return kr
