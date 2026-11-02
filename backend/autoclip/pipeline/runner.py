@@ -155,6 +155,8 @@ class PipelineRunner:
         self._is_cancelled = is_cancelled or (lambda: False)
         self.workspace = JobWorkspace(job.id)
         self._completed_weight = 0.0
+        self._overall_high = 0.0
+        self._stage_high: dict[Stage, float] = {}
 
     # -- progress ----------------------------------------------------------
 
@@ -170,9 +172,14 @@ class PipelineRunner:
         *,
         overall: float | None = None,
     ) -> None:
+        # Progress only ever moves forward. ffmpeg reports the timestamp of
+        # whichever packet it wrote last, and interleaved audio/video packets
+        # make that dip slightly, so a raw feed would jitter the bar backwards.
+        stage_progress = max(stage_progress, self._stage_high.get(stage, 0.0))
+        self._stage_high[stage] = stage_progress
         if overall is None:
             overall = self._completed_weight + STAGE_WEIGHTS[stage] * stage_progress
-        overall = min(1.0, overall)
+        overall = self._overall_high = max(min(1.0, overall), self._overall_high)
         store.update_job(self.job.id, current_stage=stage.value, progress=round(overall, 4))
         if self.on_progress:
             self.on_progress(
