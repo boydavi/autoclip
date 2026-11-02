@@ -45,6 +45,22 @@ def _safe_name(filename: str) -> str:
     return Path(filename).name
 
 
+def _create_new_file(directory: Path, name: str):
+    """Open a brand-new file for writing; never replace an existing track.
+
+    A name clash gets ``-1``, ``-2``... appended. Exclusive creation (``xb``)
+    makes this safe against two uploads racing for the same name.
+    """
+    stem, suffix = Path(name).stem, Path(name).suffix
+    for attempt in range(1000):
+        candidate = directory / (name if attempt == 0 else f"{stem}-{attempt}{suffix}")
+        try:
+            return candidate, candidate.open("xb")
+        except FileExistsError:
+            continue
+    raise HTTPException(status_code=409, detail="Too many tracks share that name.")
+
+
 @router.get("", response_model=list[MusicTrackOut])
 async def list_tracks() -> list[MusicTrackOut]:
     return await asyncio.to_thread(_list_tracks, paths.music_dir())
@@ -61,12 +77,12 @@ async def upload_track(file: UploadFile = File(...)) -> MusicTrackOut:
 
     music_dir = paths.music_dir()
     music_dir.mkdir(parents=True, exist_ok=True)
-    dest = music_dir / name
+    dest, fh = _create_new_file(music_dir, name)
 
     written = 0
     chunk_size = 1024 * 1024  # 1 MB
     try:
-        with dest.open("wb") as fh:
+        with fh:
             while True:
                 chunk = await file.read(chunk_size)
                 if not chunk:
@@ -87,7 +103,7 @@ async def upload_track(file: UploadFile = File(...)) -> MusicTrackOut:
         log.exception("Failed to write music track %s", name)
         raise HTTPException(status_code=500, detail="Upload failed.") from exc
 
-    return MusicTrackOut(filename=name, size_bytes=written)
+    return MusicTrackOut(filename=dest.name, size_bytes=written)
 
 
 @router.delete("/{filename}", status_code=204)

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
 import re
 import subprocess
@@ -242,16 +243,19 @@ def _loudnorm_filter(settings: ExportSettings, measured: dict[str, str] | None) 
     base = f"loudnorm=I={settings.loudness_lufs}:TP={LOUDNESS_TRUE_PEAK}:LRA={LOUDNESS_RANGE}"
     if measured:
         try:
-            return (
-                base
-                + f":measured_I={measured['input_i']}"
-                + f":measured_TP={measured['input_tp']}"
-                + f":measured_LRA={measured['input_lra']}"
-                + f":measured_thresh={measured['input_thresh']}"
-                + ":linear=true"
-            )
-        except KeyError:
-            pass
+            values = {key: float(measured[key]) for key in _LOUDNORM_KEYS}
+        except (KeyError, ValueError, TypeError):
+            return base
+        if not all(math.isfinite(v) for v in values.values()):
+            return base
+        return (
+            base
+            + f":measured_I={values['input_i']:.2f}"
+            + f":measured_TP={values['input_tp']:.2f}"
+            + f":measured_LRA={values['input_lra']:.2f}"
+            + f":measured_thresh={values['input_thresh']:.2f}"
+            + ":linear=true"
+        )
     return base
 
 
@@ -284,6 +288,37 @@ def _run_for_stderr(
         if proc.poll() is None:
             proc.kill()
             proc.communicate()
+
+
+_LOUDNORM_MARKER = "[Parsed_loudnorm_"
+_LOUDNORM_KEYS = ("input_i", "input_tp", "input_lra", "input_thresh")
+
+
+def parse_loudnorm_stats(stderr: str) -> dict[str, str]:
+    """Extract loudnorm's measured values from ffmpeg's stderr, or ``{}``.
+
+    Only the JSON block that directly follows loudnorm's own log prefix is read,
+    so other text in stderr (input metadata, filenames) cannot be mistaken for
+    it. Every value must be a finite number: a silent clip measures ``-inf``,
+    and passing that on would make the encode pass fail, so it falls back to
+    single-pass normalisation instead. Numbers are re-formatted here rather than
+    copied through as raw text.
+    """
+    marker = stderr.rfind(_LOUDNORM_MARKER)
+    if marker == -1:
+        return {}
+    start = stderr.find("{", marker)
+    end = stderr.find("}", start) + 1
+    if start == -1 or end <= start:
+        return {}
+    try:
+        raw = json.loads(stderr[start:end])
+        values = {key: float(raw[key]) for key in _LOUDNORM_KEYS}
+    except (ValueError, KeyError, TypeError):
+        return {}
+    if not all(math.isfinite(v) for v in values.values()):
+        return {}
+    return {key: f"{value:.2f}" for key, value in values.items()}
 
 
 def _loudnorm_analysis(
@@ -355,11 +390,9 @@ def _loudnorm_analysis(
 
     try:
         stderr = _run_for_stderr(command, timeout_s=analysis_timeout, cancelled=cancelled)
-        # loudnorm JSON block appears at the tail of stderr between { and }
-        start_idx = stderr.rfind("{")
-        end_idx = stderr.rfind("}") + 1
-        if start_idx != -1 and end_idx > start_idx:
-            return json.loads(stderr[start_idx:end_idx])
+        stats = parse_loudnorm_stats(stderr)
+        if stats:
+            return stats
     except subprocess.TimeoutExpired:
         log.warning(
             "loudnorm analysis timed out after %.0fs; using single-pass normalisation.",

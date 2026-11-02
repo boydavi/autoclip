@@ -13,6 +13,77 @@ from autoclip.jobs.events import QUEUE_SIZE, Event, EventBroker
 from autoclip.pipeline import export, ffmpeg
 
 
+LOUDNORM_BLOCK = """[Parsed_loudnorm_0 @ 0000015]
+{{
+\t"input_i" : "{i}",
+\t"input_tp" : "{tp}",
+\t"input_lra" : "{lra}",
+\t"input_thresh" : "{thresh}",
+\t"output_i" : "-13.95",
+\t"target_offset" : "-0.05"
+}}
+[out#0/null @ 0000016] video:0KiB audio:1125KiB
+"""
+
+
+def loudnorm_stderr(i="-21.85", tp="-18.06", lra="0.00", thresh="-31.85") -> str:
+    return LOUDNORM_BLOCK.format(i=i, tp=tp, lra=lra, thresh=thresh)
+
+
+class TestLoudnormStatsParsing:
+    def test_reads_the_measured_values(self) -> None:
+        assert export.parse_loudnorm_stats(loudnorm_stderr()) == {
+            "input_i": "-21.85",
+            "input_tp": "-18.06",
+            "input_lra": "0.00",
+            "input_thresh": "-31.85",
+        }
+
+    def test_silent_audio_falls_back_to_single_pass(self) -> None:
+        # A silent clip really does measure -inf; it must not reach the filter.
+        assert export.parse_loudnorm_stats(loudnorm_stderr(i="-inf", tp="-inf")) == {}
+
+    def test_json_in_input_metadata_is_ignored(self) -> None:
+        decoy = 'title : {"input_i": "0", "input_tp": "0", "input_lra": "0", "input_thresh": "0"}\n'
+
+        parsed = export.parse_loudnorm_stats(decoy + loudnorm_stderr())
+
+        assert parsed["input_i"] == "-21.85"
+
+    def test_json_without_the_loudnorm_marker_is_rejected(self) -> None:
+        text = '{"input_i": "-20", "input_tp": "-1", "input_lra": "5", "input_thresh": "-30"}'
+
+        assert export.parse_loudnorm_stats(text) == {}
+
+    def test_non_numeric_values_cannot_inject_filter_options(self) -> None:
+        assert export.parse_loudnorm_stats(loudnorm_stderr(i="-14:measured_I=0")) == {}
+
+    def test_missing_keys_and_garbage_are_rejected(self) -> None:
+        assert export.parse_loudnorm_stats("[Parsed_loudnorm_0 @ 1] \n{ not json }") == {}
+        assert export.parse_loudnorm_stats("") == {}
+
+
+class TestLoudnormFilter:
+    SETTINGS = export.ExportSettings()
+
+    def test_measured_values_enable_linear_mode(self) -> None:
+        stats = export.parse_loudnorm_stats(loudnorm_stderr())
+
+        filter_string = export._loudnorm_filter(self.SETTINGS, stats)
+
+        assert "measured_I=-21.85" in filter_string
+        assert filter_string.endswith(":linear=true")
+
+    def test_non_finite_or_tainted_stats_are_not_inserted(self) -> None:
+        for bad in ("-inf", "nan", "-14:measured_I=0"):
+            stats = {"input_i": bad, "input_tp": "-1", "input_lra": "1", "input_thresh": "-30"}
+
+            assert "measured_" not in export._loudnorm_filter(self.SETTINGS, stats)
+
+    def test_no_stats_is_plain_single_pass(self) -> None:
+        assert "measured_" not in export._loudnorm_filter(self.SETTINGS, None)
+
+
 class TestRedactSecrets:
     def test_hides_a_masked_key_echoed_by_a_provider(self) -> None:
         message = (

@@ -222,6 +222,26 @@ class TestAudioOnlyRender:
         assert info.has_audio
         assert info.duration_s == pytest.approx(5.0, abs=0.35)
 
+    def test_silent_audio_still_exports(self, words, tmp_path) -> None:
+        # A silent clip measures -inf loudness; the export must fall back to
+        # single-pass normalisation instead of failing on an invalid filter value.
+        silent = tmp_path / "silent.wav"
+        subprocess.run(
+            [
+                ffmpeg.ffmpeg_path(), "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", f"anullsrc=r=48000:cl=mono", "-t", str(SOURCE_DURATION),
+                str(silent),
+            ],
+            check=True,
+            capture_output=True,
+        )
+        destination = tmp_path / "silent.mp4"
+
+        export.export_clip(self._request(silent, destination, words), work_dir=tmp_path / "work")
+
+        assert destination.exists()
+        assert ffmpeg.probe(destination).duration_s == pytest.approx(5.0, abs=0.35)
+
     def test_background_input_is_required(self, audio_source, words, tmp_path) -> None:
         request = self._request(audio_source, tmp_path / "x.mp4", words)
 

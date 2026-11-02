@@ -187,6 +187,18 @@ class TestMusicApi:
         assert [t["filename"] for t in listed] == ["a-song.wav", "b-song.mp3"]
         assert listed[1]["size_bytes"] == 5
 
+    def test_uploading_the_same_name_never_replaces_the_original(
+        self, client: TestClient
+    ) -> None:
+        from autoclip import paths
+
+        first = self._upload(client, "song.mp3", b"original")
+        second = self._upload(client, "song.mp3", b"imposter-bytes")
+
+        assert (first.json()["filename"], second.json()["filename"]) == ("song.mp3", "song-1.mp3")
+        assert (paths.music_dir() / "song.mp3").read_bytes() == b"original"
+        assert (paths.music_dir() / "song-1.mp3").read_bytes() == b"imposter-bytes"
+
     def test_unsupported_format_is_rejected(self, client: TestClient) -> None:
         response = self._upload(client, "notes.txt")
 
