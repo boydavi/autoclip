@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import time
 from collections.abc import Callable
 from pathlib import Path
 
@@ -237,8 +238,37 @@ def _split_audio(audio: Path, workdir: Path) -> list[tuple[Path, float]]:
     return chunks
 
 
+#: Groq answers 429 when the audio-seconds-per-hour/day budget (or requests per
+#: minute) is spent, and 5xx on transient trouble. Wait for what it asks for.
+_GROQ_MAX_ATTEMPTS = 6
+_GROQ_BACKOFF_S = 5.0          # base delay when no Retry-After header is sent
+_GROQ_MAX_WAIT_S = 900.0       # longest single wait we accept (15 min)
+
+
+def _groq_retry_delay(exc: Exception, attempt: int) -> float | None:
+    """Seconds to wait before retrying *exc*, or None when it is not retryable."""
+    status = getattr(exc, "status_code", None)
+    if status is None:
+        # Connection resets/timeouts carry no status; retry those too.
+        if exc.__class__.__name__ not in {"APIConnectionError", "APITimeoutError"}:
+            return None
+        return _GROQ_BACKOFF_S * (2 ** attempt)
+    if status != 429 and status < 500:
+        return None
+    headers = getattr(getattr(exc, "response", None), "headers", None) or {}
+    try:
+        return max(float(headers.get("retry-after")), 1.0)
+    except (TypeError, ValueError):
+        return _GROQ_BACKOFF_S * (2 ** attempt)
+
+
 def _call_groq_api(file_path: Path, api_key: str, language: str, model: str) -> dict:
-    """POST one file to Groq's transcription endpoint; returns the verbose_json dict."""
+    """POST one file to Groq's transcription endpoint; returns the verbose_json dict.
+
+    Retries 429/5xx/connection errors, honouring Retry-After. A wait longer than
+    ``_GROQ_MAX_WAIT_S`` (an exhausted hourly/daily audio quota) is not sat
+    through: it fails with the wait in the message so the job can be resumed.
+    """
     try:
         from openai import OpenAI
     except ImportError as exc:
@@ -246,16 +276,55 @@ def _call_groq_api(file_path: Path, api_key: str, language: str, model: str) -> 
             "openai package is required for Groq transcription: pip install openai"
         ) from exc
 
-    client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=api_key)
-    with open(file_path, "rb") as fh:
-        resp = client.audio.transcriptions.create(
-            file=fh,
-            model=model,
-            language=language or None,
-            response_format="verbose_json",
-            timestamp_granularities=["word", "segment"],
-        )
-    return resp.model_dump() if hasattr(resp, "model_dump") else dict(resp)
+    # max_retries=0: this loop owns retrying so it can honour Retry-After.
+    client = OpenAI(base_url="https://api.groq.com/openai/v1", api_key=api_key, max_retries=0)
+    for attempt in range(_GROQ_MAX_ATTEMPTS):
+        try:
+            with open(file_path, "rb") as fh:
+                resp = client.audio.transcriptions.create(
+                    file=fh,
+                    model=model,
+                    language=language or None,
+                    response_format="verbose_json",
+                    timestamp_granularities=["word", "segment"],
+                )
+            return resp.model_dump() if hasattr(resp, "model_dump") else dict(resp)
+        except Exception as exc:
+            delay = _groq_retry_delay(exc, attempt)
+            last = attempt == _GROQ_MAX_ATTEMPTS - 1
+            if delay is None or last or delay > _GROQ_MAX_WAIT_S:
+                if delay is not None and delay > _GROQ_MAX_WAIT_S:
+                    raise TranscriptionError(
+                        f"Groq rate limit reached; it asks for a {delay / 60:.0f} min wait "
+                        "(hourly/daily audio quota). Resume the job after that, or switch "
+                        "Whisper to local. Chunks already transcribed are kept."
+                    ) from exc
+                raise TranscriptionError(f"Groq transcription failed: {exc}") from exc
+            log.warning("Groq %s (attempt %d/%d); retrying in %.0f s.",
+                        getattr(exc, "status_code", type(exc).__name__),
+                        attempt + 1, _GROQ_MAX_ATTEMPTS, delay)
+            time.sleep(delay)
+    raise TranscriptionError("Groq transcription failed.")  # pragma: no cover
+
+
+def _cached_groq_call(chunk: Path, api_key: str, language: str, model: str) -> dict:
+    """Reuse a chunk's saved response so a resumed job never pays for it twice."""
+    cache = chunk.with_name(chunk.name + ".groq.json")
+    info = chunk.stat()
+    stamp = {"model": model, "language": language, "size": info.st_size, "mtime": info.st_mtime_ns}
+    try:
+        saved = json.loads(cache.read_text(encoding="utf-8"))
+        if saved.get("stamp") == stamp:
+            log.info("Groq chunk %s: using saved response.", chunk.name)
+            return saved["data"]
+    except (OSError, ValueError, KeyError, AttributeError):
+        pass
+    data = _call_groq_api(chunk, api_key, language, model)
+    try:
+        cache.write_text(json.dumps({"stamp": stamp, "data": data}), encoding="utf-8")
+    except (OSError, TypeError, ValueError):
+        log.warning("Could not save the Groq response for %s.", chunk.name)
+    return data
 
 
 def _find_word_range(words: list[Word], start_s: float, end_s: float) -> tuple[int, int]:
@@ -301,7 +370,7 @@ def transcribe_groq(
         if on_progress and len(chunks) > 1:
             on_progress(i / len(chunks))
         log.info("Groq chunk %d/%d (offset %.0f s)", i + 1, len(chunks), offset_s)
-        data = _call_groq_api(chunk_path, api_key, language, model)
+        data = _cached_groq_call(chunk_path, api_key, language, model)
 
         for w in data.get("words") or []:
             w_start = float(w.get("start", 0))

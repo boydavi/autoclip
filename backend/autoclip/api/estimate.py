@@ -43,13 +43,19 @@ _GROQ_WHISPER_DEFAULT = 0.04 / 3600
 
 # LLM pricing: provider → [(model_substring, input_$/MTok, output_$/MTok)].
 # First match (case-insensitive substring) wins; empty string = fallback.
+# Anthropic 5.x rows are the standard-tier prices from
+# platform.claude.com/docs/en/about-claude/pricing (prompts ≤100K tokens, which
+# every AutoClip window is; Haiku 5.5 bills $0.50/$2.50 above that). The older
+# rows are legacy generations kept for users who still pin them.
 _LLM_PRICING: dict[str, list[tuple[str, float, float]]] = {
     "anthropic": [
-        ("haiku",   0.80,   4.00),
-        ("opus-5", 75.00, 375.00),   # claude-opus-5-5 and later Opus-class models
-        ("opus",   15.00,  75.00),   # legacy claude-opus-4 / 3
-        ("sonnet",  3.00,  15.00),
-        ("",        3.00,  15.00),
+        ("haiku-5",  0.10,   0.50),
+        ("sonnet-5", 2.00,  10.00),
+        ("opus-5",   4.00,  20.00),
+        ("haiku",    1.00,   5.00),   # legacy claude-haiku-4-5
+        ("opus",    15.00,  75.00),   # legacy claude-opus-4 / 4.1 / 3
+        ("sonnet",   3.00,  15.00),   # legacy claude-sonnet-4 / 3.7
+        ("",         3.00,  15.00),
     ],
     "openai": [
         ("gpt-4o-mini",  0.15,  0.60),
@@ -65,7 +71,9 @@ _LLM_PRICING: dict[str, list[tuple[str, float, float]]] = {
         ("",           0.075,  0.30),
     ],
     "groq": [
-        ("",  0.06, 0.06),  # compound-beta / llama tier
+        ("gpt-oss-20b",  0.075, 0.30),
+        ("gpt-oss-120b", 0.15,  0.60),
+        ("",             0.15,  0.60),  # unknown Groq model: assume the pricier gpt-oss
     ],
     "ollama": [
         ("", 0.0, 0.0),

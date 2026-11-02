@@ -282,7 +282,13 @@ class PipelineRunner:
                 on_progress=self._stage_progress(stage),
             )
 
-        if self.source.has_video and not self.workspace.thumbnails.exists():
+        # Scrubbing thumbnails need a full video decode (~80% of this stage on
+        # 1080p VP9) and a scan-only job never shows a UI that uses them.
+        if (
+            self.source.has_video
+            and not self.settings.export.scan_only
+            and not self.workspace.thumbnails.exists()
+        ):
             prepare.generate_thumbnails(source_path, self.workspace.thumbnails)
 
         self._finish_stage(stage)

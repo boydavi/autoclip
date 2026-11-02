@@ -183,6 +183,28 @@ class TestWindowCount:
 
 
 class TestLlmPricing:
+    #: Standard-tier $/MTok (input, output) from platform.claude.com/docs/en/about-claude/pricing.
+    OFFICIAL = {
+        "claude-haiku-5-5": (0.10, 0.50),
+        "claude-sonnet-5-5": (2.00, 10.00),
+        "claude-sonnet-5": (2.00, 10.00),
+        "claude-opus-5-5": (4.00, 20.00),
+    }
+
+    @staticmethod
+    def _expected(inp: float, out: float) -> float:
+        input_tokens = (
+            estimate._SYSTEM_TOKENS
+            + estimate._WORDS_PER_S * WINDOW_S * estimate._TOKENS_PER_WORD
+        )
+        return (input_tokens * inp + estimate._OUTPUT_TOKENS * out) / 1_000_000
+
+    @pytest.mark.parametrize("model", sorted(OFFICIAL))
+    def test_current_claude_models_match_the_official_rates(self, model: str) -> None:
+        assert estimate._llm_per_window("anthropic", model) == pytest.approx(
+            self._expected(*self.OFFICIAL[model])
+        )
+
     def test_pricier_models_cost_more_per_window(self) -> None:
         haiku = estimate._llm_per_window("anthropic", "claude-haiku-5-5")
         sonnet = estimate._llm_per_window("anthropic", "claude-sonnet-5-5")
@@ -190,10 +212,25 @@ class TestLlmPricing:
 
         assert haiku < sonnet < opus
 
-    def test_new_opus_is_priced_above_legacy_opus(self) -> None:
-        assert estimate._llm_per_window("anthropic", "claude-opus-5-5") > estimate._llm_per_window(
-            "anthropic", "claude-opus-4"
+    def test_haiku_120_minute_source_costs_about_a_cent(self) -> None:
+        windows = estimate._window_count(7200)
+
+        assert windows == 17
+        assert 17 * estimate._llm_per_window("anthropic", "claude-haiku-5-5") == pytest.approx(
+            0.0092, abs=0.0005
         )
+
+    def test_legacy_opus_keeps_its_old_price(self) -> None:
+        assert estimate._llm_per_window("anthropic", "claude-opus-4") == pytest.approx(
+            self._expected(15.00, 75.00)
+        )
+
+    @pytest.mark.parametrize(
+        ("model", "rates"),
+        [("openai/gpt-oss-120b", (0.15, 0.60)), ("openai/gpt-oss-20b", (0.075, 0.30))],
+    )
+    def test_groq_gpt_oss_models_match_the_published_rates(self, model, rates) -> None:
+        assert estimate._llm_per_window("groq", model) == pytest.approx(self._expected(*rates))
 
     def test_local_models_are_free(self) -> None:
         assert estimate._llm_per_window("ollama", "llama3") == 0.0
@@ -203,14 +240,14 @@ class TestLlmPricing:
             "anthropic", "sonnet"
         )
 
-    def test_sonnet_window_cost_matches_the_published_rates(self) -> None:
+    def test_legacy_sonnet_window_cost_matches_the_published_rates(self) -> None:
         input_tokens = (
             estimate._SYSTEM_TOKENS
             + estimate._WORDS_PER_S * WINDOW_S * estimate._TOKENS_PER_WORD
         )
         expected = (input_tokens * 3.00 + estimate._OUTPUT_TOKENS * 15.00) / 1_000_000
 
-        assert estimate._llm_per_window("anthropic", "claude-sonnet-5-5") == pytest.approx(expected)
+        assert estimate._llm_per_window("anthropic", "claude-sonnet-4") == pytest.approx(expected)
 
 
 class TestWhisperCost:

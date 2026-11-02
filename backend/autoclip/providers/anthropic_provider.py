@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 
 from .base import DetectionConfig, LLMProvider, ProviderError, ProviderStatus
 
@@ -14,8 +15,20 @@ DEFAULT_MODEL = "claude-sonnet-5"
 SUGGESTED_MODELS = [
     "claude-opus-5",
     "claude-sonnet-5",
+    "claude-haiku-5-5",
     "claude-haiku-4-5-20251001",
 ]
+
+
+#: Older generations that still accept ``temperature``. Everything else
+#: (5.x, and the 4.6+ line) rejects non-default sampling parameters.
+_LEGACY_SAMPLING_MODEL = re.compile(
+    r"claude-(3|opus-4(-[01])?($|-\d{8})|sonnet-4(-5)?($|-\d{8})|haiku-4(-5)?($|-\d{8}))"
+)
+
+
+def accepts_sampling_params(model: str) -> bool:
+    return bool(_LEGACY_SAMPLING_MODEL.match(model.lower()))
 
 
 class AnthropicProvider(LLMProvider):
@@ -47,25 +60,28 @@ class AnthropicProvider(LLMProvider):
 
     async def _complete(self, system: str, user: str, config: DetectionConfig) -> str:
         client = self._client()
+        # Current models (Haiku 5.5, Sonnet/Opus 5.x) answer 400 to an assistant
+        # prefill and to any non-default sampling parameter, so the request ends
+        # on the user turn and the "JSON only" instruction lives in the prompt;
+        # extract_json_object copes with a stray sentence or fence.
+        # Adaptive thinking is on by default there and its tokens count against
+        # max_tokens, hence the larger cap.
+        kwargs: dict = {"max_tokens": 4096 if accepts_sampling_params(self.model) else 8192}
+        if accepts_sampling_params(self.model):
+            kwargs["temperature"] = config.temperature
         try:
             message = await client.messages.create(
                 model=self.model,
-                max_tokens=4096,
-                temperature=config.temperature,
                 system=system,
-                messages=[
-                    {"role": "user", "content": user},
-                    # Prefilling the assistant turn with an opening brace is the
-                    # cheapest way to stop Claude prepending a sentence of prose.
-                    {"role": "assistant", "content": "{"},
-                ],
+                messages=[{"role": "user", "content": user}],
+                **kwargs,
             )
         except Exception as exc:
             raise _translate(exc, self.name, self.model) from exc
 
-        text = "".join(block.text for block in message.content if hasattr(block, "text"))
-        # Put back the brace we prefilled.
-        return "{" + text
+        return "".join(
+            block.text for block in message.content if getattr(block, "type", "") == "text"
+        )
 
     async def health_check(self) -> ProviderStatus:
         if not self.api_key:

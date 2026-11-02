@@ -55,3 +55,32 @@ def test_progress_is_clamped_to_one(runner_and_events) -> None:
 
     assert events[-1].stage_progress == 1.0
     assert events[-1].overall <= 1.0
+
+
+@pytest.mark.parametrize(("scan_only", "expected_calls"), [(True, 0), (False, 1)])
+def test_scan_only_skips_the_unused_thumbnail_decode(
+    initialised_db, tmp_path, monkeypatch, scan_only, expected_calls
+) -> None:
+    from autoclip.pipeline import prepare
+
+    media = tmp_path / "x.mp4"
+    media.write_bytes(b"\0")
+    source = store.create_source(
+        Source(id=new_id(), type="upload", path=str(media), title="t", has_video=True)
+    )
+    job = store.create_job(Job(id=new_id(), source_id=source.id, provider="p", settings={}))
+    settings = Settings()
+    settings.export.scan_only = scan_only
+    runner = PipelineRunner(job, source, settings=settings, on_progress=lambda e: None)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        prepare, "extract_audio", lambda *a, **k: runner.workspace.audio.write_bytes(b"a")
+    )
+    monkeypatch.setattr(
+        prepare, "generate_thumbnails", lambda *a, **k: calls.append("thumbs")
+    )
+    runner.workspace.audio.parent.mkdir(parents=True, exist_ok=True)
+
+    runner._stage_prepare()
+
+    assert len(calls) == expected_calls
