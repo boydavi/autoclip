@@ -61,12 +61,30 @@ class ClipCandidate(BaseModel):
     hook: str = ""
     score: int = Field(default=50, ge=0, le=100)
     reason: str = ""
+    #: Post text for the platform caption box, and its hashtags (``#tag`` each).
+    description: str = ""
+    hashtags: list[str] = Field(default_factory=list)
 
-    @field_validator("title", "hook", "reason", mode="before")
+    @field_validator("title", "hook", "reason", "description", mode="before")
     @classmethod
     def _coerce_to_string(cls, value: Any) -> str:
         # Models occasionally return null or a number where text was asked for.
         return "" if value is None else str(value)
+
+    @field_validator("hashtags", mode="before")
+    @classmethod
+    def _coerce_hashtags(cls, value: Any) -> list[str]:
+        """Accept a list or a space/comma separated string; normalise to ``#tag``."""
+        if value is None:
+            return []
+        items = re.split(r"[\s,]+", value) if isinstance(value, str) else list(value)
+        tags: list[str] = []
+        for item in items:
+            word = re.sub(r"[^\w]", "", str(item))
+            tag = f"#{word}" if word else ""
+            if tag and tag.lower() not in {t.lower() for t in tags}:
+                tags.append(tag)
+        return tags[:8]
 
     @field_validator("score", mode="before")
     @classmethod
@@ -225,7 +243,23 @@ def load_prompt(version: str) -> str:
             f"Prompt '{version}' not found at {path}.",
             hint="Prompt files live in backend/autoclip/prompts/ as versioned .txt files.",
         )
-    return path.read_text(encoding="utf-8")
+    return path.read_text(encoding="utf-8") + POST_CAPTION_PROMPT
+
+
+#: Appended to every prompt style so the post caption is requested in one place.
+POST_CAPTION_PROMPT = """
+
+## Post caption
+
+Every clip object also carries two extra fields, written for the box a creator
+pastes into when posting:
+
+`description` — one or two sentences, under 150 characters, in the speaker's
+language. Lead with the hook, no spoilers of the payoff, no emoji spam.
+
+`hashtags` — three to five, as a JSON array of strings like ["#startups", "#growth"].
+Specific to the clip's topic; no generic tags such as #fyp.
+"""
 
 
 def render_window_prompt(window: TranscriptWindow, config: DetectionConfig) -> str:

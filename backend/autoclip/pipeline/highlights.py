@@ -323,6 +323,8 @@ def build_clips(
                 hook=hook,
                 score=candidate.score,
                 reason=candidate.reason.strip(),
+                description=candidate.description.strip(),
+                hashtags=" ".join(candidate.hashtags),
             )
         )
 

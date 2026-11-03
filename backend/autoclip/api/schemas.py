@@ -183,6 +183,8 @@ class ClipOut(BaseModel):
     user_trimmed: bool
     caption_style: str = "bold_pop"
     ratio: str = "9:16"
+    description: str = ""
+    hashtags: str = ""
     exports: list[ExportOut] = Field(default_factory=list)
 
     @classmethod
@@ -212,6 +214,8 @@ class ClipOut(BaseModel):
             user_trimmed=clip.user_trimmed,
             caption_style=edit.caption_style if edit else default_style,
             ratio=edit.ratio if edit else default_ratio,
+            description=clip.description,
+            hashtags=clip.hashtags,
             exports=[ExportOut.of(e) for e in (exports or [])],
         )
 

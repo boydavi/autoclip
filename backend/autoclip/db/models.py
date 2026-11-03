@@ -150,6 +150,14 @@ class Clip:
     status: ClipStatus = "candidate"
     user_trimmed: bool = False
     created_at: str = field(default_factory=utcnow)
+    description: str = ""
+    #: Space separated ``#tags``; kept flat so SQLite needs no JSON column.
+    hashtags: str = ""
+
+    @property
+    def post_caption(self) -> str:
+        """Description plus hashtags, ready to paste into a platform's caption box."""
+        return "\n\n".join(part for part in (self.description, self.hashtags) if part)
 
     @property
     def duration_s(self) -> float:
@@ -172,6 +180,8 @@ class Clip:
             status=row["status"],
             user_trimmed=bool(row["user_trimmed"]),
             created_at=row["created_at"],
+            description=row["description"],
+            hashtags=row["hashtags"],
         )
 
 

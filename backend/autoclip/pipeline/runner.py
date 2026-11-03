@@ -568,6 +568,11 @@ class PipelineRunner:
                 cancelled=self._is_cancelled,
             )
 
+            if clip.post_caption:
+                destination.with_suffix(".txt").write_text(
+                    clip.post_caption + "\n", encoding="utf-8"
+                )
+
             store.create_export(
                 Export(
                     id=new_id(),
