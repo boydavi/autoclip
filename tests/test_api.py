@@ -687,6 +687,7 @@ class TestProviderStatus:
             "anthropic",
             "openai",
             "gemini",
+            "groq",
             "ollama",
         }
 

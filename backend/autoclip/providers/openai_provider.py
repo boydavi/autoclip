@@ -36,6 +36,7 @@ KNOWN_ENDPOINTS = {
 class OpenAIProvider(LLMProvider):
     name = "openai"
     requires_key = True
+    suggested_models: list[str] = SUGGESTED_MODELS
 
     def __init__(self, model: str = "", *, api_key: str | None = None, base_url: str | None = None):
         super().__init__(model or DEFAULT_MODEL, api_key=api_key, base_url=base_url)
@@ -51,9 +52,9 @@ class OpenAIProvider(LLMProvider):
         key = self.api_key or ("not-needed" if self._is_local() else None)
         if not key:
             raise ProviderError(
-                "No API key is set for the OpenAI-compatible provider.",
+                f"No API key is set for the {self.name} provider.",
                 provider=self.name,
-                hint="Add one with `autoclip config set-secret openai`.",
+                hint=f"Add one with `autoclip config set-secret {self.name}`.",
             )
 
         kwargs = {"api_key": key}
@@ -100,7 +101,10 @@ class OpenAIProvider(LLMProvider):
     async def health_check(self) -> ProviderStatus:
         if not self.api_key and not self._is_local():
             return ProviderStatus(
-                name=self.name, available=False, detail="No API key set", models=SUGGESTED_MODELS
+                name=self.name,
+                available=False,
+                detail="No API key set",
+                models=self.suggested_models,
             )
         try:
             client = self._client()
@@ -112,7 +116,7 @@ class OpenAIProvider(LLMProvider):
             name=self.name,
             available=True,
             detail=self.base_url or "https://api.openai.com/v1",
-            models=names or SUGGESTED_MODELS,
+            models=names or self.suggested_models,
         )
 
 
@@ -129,7 +133,7 @@ def _translate(exc: Exception, provider: str, model: str) -> ProviderError:
         return ProviderError(
             "The endpoint rejected the API key.",
             provider=provider,
-            hint="Re-add it with `autoclip config set-secret openai`.",
+            hint=f"Re-add it with `autoclip config set-secret {provider}`.",
         )
     if "429" in lowered or "rate limit" in lowered:
         return ProviderError(
