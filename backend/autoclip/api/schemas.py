@@ -185,6 +185,7 @@ class ClipOut(BaseModel):
     ratio: str = "9:16"
     description: str = ""
     hashtags: str = ""
+    mood: str = ""
     exports: list[ExportOut] = Field(default_factory=list)
 
     @classmethod
@@ -216,6 +217,7 @@ class ClipOut(BaseModel):
             ratio=edit.ratio if edit else default_ratio,
             description=clip.description,
             hashtags=clip.hashtags,
+            mood=clip.mood,
             exports=[ExportOut.of(e) for e in (exports or [])],
         )
 

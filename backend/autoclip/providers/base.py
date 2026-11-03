@@ -52,6 +52,10 @@ class ProviderError(RuntimeError):
 # --------------------------------------------------------------------------
 
 
+#: Music moods; match the subfolders of the music library (energetic/, calm/, dramatic/).
+MOODS = ("energetic", "calm", "dramatic")
+
+
 class ClipCandidate(BaseModel):
     """One proposed clip, as returned by the model."""
 
@@ -64,6 +68,15 @@ class ClipCandidate(BaseModel):
     #: Post text for the platform caption box, and its hashtags (``#tag`` each).
     description: str = ""
     hashtags: list[str] = Field(default_factory=list)
+    #: Emotional register of what is said; picks the music mood downstream.
+    mood: str = ""
+
+    @field_validator("mood", mode="before")
+    @classmethod
+    def _coerce_mood(cls, value: Any) -> str:
+        """Only the three moods the music library is organised by; anything else is unknown."""
+        text = "" if value is None else str(value).strip().lower()
+        return text if text in MOODS else ""
 
     @field_validator("title", "hook", "reason", "description", mode="before")
     @classmethod
@@ -251,14 +264,22 @@ POST_CAPTION_PROMPT = """
 
 ## Post caption
 
-Every clip object also carries two extra fields, written for the box a creator
-pastes into when posting:
+Every clip object also carries three extra fields. `description` and `hashtags` are
+written for the box a creator pastes into when posting:
 
 `description` — one or two sentences, under 150 characters, in the speaker's
 language. Lead with the hook, no spoilers of the payoff, no emoji spam.
 
 `hashtags` — three to five, as a JSON array of strings like ["#startups", "#growth"].
 Specific to the clip's topic; no generic tags such as #fyp.
+
+`mood` — the emotional register of what is SAID, which chooses the background music.
+Exactly one of "energetic", "calm", "dramatic". Judge the message, not the speaking
+speed:
+- "dramatic": a reveal, a hard truth, tension, a turning point, a serious or emotional
+  statement, anything where the music should add weight.
+- "energetic": motivation, humour, excitement, urgency, a fast payoff.
+- "calm": reflection, gentle advice, reassurance, a soft or intimate message.
 """
 
 

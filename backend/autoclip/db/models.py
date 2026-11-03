@@ -153,6 +153,8 @@ class Clip:
     description: str = ""
     #: Space separated ``#tags``; kept flat so SQLite needs no JSON column.
     hashtags: str = ""
+    #: "energetic" | "calm" | "dramatic", or "" when the model gave none.
+    mood: str = ""
 
     @property
     def post_caption(self) -> str:
@@ -182,6 +184,7 @@ class Clip:
             created_at=row["created_at"],
             description=row["description"],
             hashtags=row["hashtags"],
+            mood=row["mood"],
         )
 
 

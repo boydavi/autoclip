@@ -211,7 +211,9 @@ def main() -> int:
     for w in warnings[:15]:
         print("  warn:", w[:200])
     for c in clips:
-        print(f"  clip {c.start_s:7.1f}-{c.end_s:7.1f}  {getattr(c, 'title', '')[:70]}")
+        print(f"  clip {c.start_s:7.1f}-{c.end_s:7.1f}  [{c.mood or '-':9}] {c.title[:60]}")
+        if c.description or c.hashtags:
+            print(f"      {c.description[:110]}  {c.hashtags}")
     return 0 if all(ok for _, ok, _ in checks) else 1
 
 
