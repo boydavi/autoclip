@@ -15,7 +15,7 @@ import os
 import re
 import subprocess
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 
 from ..config import ExportSettings
@@ -23,7 +23,13 @@ from ..system import report
 from . import captions as captions_module
 from . import ffmpeg
 from .captions import CaptionStyle
-from .reframe.croppath import CropPath, segment_crop_filter
+from .reframe.croppath import (
+    CropPath,
+    CropSegment,
+    layout_of,
+    plan_split_layout,
+    segment_crop_filter,
+)
 from .transcript import Word
 
 log = logging.getLogger(__name__)
@@ -100,6 +106,43 @@ def output_filename(title: str, ratio: str, *, rank: int | None = None) -> str:
 # --------------------------------------------------------------------------
 
 
+#: Output ratios where two stacked panes still look right (a 16:9 frame would be two thin strips).
+SPLIT_RATIOS = ("9:16", "1:1")
+#: Length of the crossfade between a split-screen shot and its neighbours.
+SPLIT_FADE_S = 0.25
+#: Pane window width as a multiple of the face width: head and shoulders per pane.
+SPLIT_WINDOW_FACES = 4.2
+
+
+def planned_segments(request: ExportRequest) -> list[CropSegment]:
+    """The crop path's segments after the split-screen rules are applied."""
+    segments = request.crop_path.segments
+    if request.ratio not in SPLIT_RATIOS:
+        return [replace(s, split_on=False) for s in segments]
+    return plan_split_layout(segments)
+
+
+def split_windows(request: ExportRequest) -> list[tuple[float, float]]:
+    """Clip-relative (start, end) of every stretch drawn as a split screen."""
+    if not request.has_video:
+        return []
+    return [(s.start_s, s.end_s) for s in planned_segments(request) if layout_of(s) == "split"]
+
+
+def _fade_after(segments: list[CropSegment], index: int) -> float:
+    """Crossfade length at the boundary after ``segments[index]``; 0 means a hard cut.
+
+    Only a change into or out of a split screen is faded; crop-to-crop cuts stay cuts.
+    """
+    if index + 1 >= len(segments):
+        return 0.0
+    a, b = layout_of(segments[index]), layout_of(segments[index + 1])
+    if a == b or "split" not in (a, b):
+        return 0.0
+    fade = min(SPLIT_FADE_S, 0.4 * segments[index].duration_s, 0.4 * segments[index + 1].duration_s)
+    return fade if fade >= 0.08 else 0.0
+
+
 def build_video_filtergraph(
     request: ExportRequest,
     *,
@@ -122,9 +165,12 @@ def build_video_filtergraph(
         parts.append(f"[{background_input}:v]setsar=1,format=yuv420p[v0]")
         segments = []
     else:
-        segments = request.crop_path.segments
+        segments = planned_segments(request)
         if not segments:
             raise ExportError("The crop path has no segments.")
+
+    fades = [_fade_after(segments, i) for i in range(len(segments))]
+    crossfading = any(fades)
 
     for index, segment in enumerate(segments):
         label = f"v{index}"
@@ -136,11 +182,20 @@ def build_video_filtergraph(
             prefix = ""
         else:
             source_label = f"[s{index}]"
+            # A segment that is crossfaded into the next one runs on past its end by the
+            # fade, so both layouts show the same moment of the source while they blend.
+            end = segment.end_s + fades[index]
             prefix = (
-                f"[0:v]trim=start={segment.start_s:.4f}:end={segment.end_s:.4f},"
-                f"setpts=PTS-STARTPTS{source_label}"
+                f"[0:v]trim=start={segment.start_s:.4f}:end={end:.4f},"
+                f"setpts=PTS-STARTPTS{',fps=30' if crossfading else ''}{source_label}"
             )
             parts.append(prefix)
+
+        if layout_of(segment) == "split":
+            parts.extend(
+                _split_chain(source_label, index, segment, request.crop_path, out_w, out_h)
+            )
+            continue
 
         if segment.fit:
             parts.extend(_fit_chain(source_label, index, out_w, out_h))
@@ -156,9 +211,29 @@ def build_video_filtergraph(
 
     if len(segments) <= 1:
         current = "[v0]"
-    else:
+    elif not crossfading:
         parts.append(f"{''.join(labels)}concat=n={len(segments)}:v=1:a=0[vcat]")
         current = "[vcat]"
+    else:
+        # Walk the shots in order: hard cuts concat, split-screen boundaries crossfade.
+        # ``played`` is the true running length, so each fade starts where the previous
+        # shot's real end is, and the total stays equal to the sum of the shots (the
+        # audio is untouched and must stay in sync).
+        acc, played = "[v0]", segments[0].duration_s
+        for i in range(1, len(segments)):
+            nxt = f"[a{i}]"
+            fade = fades[i - 1]
+            if fade:
+                parts.append(
+                    f"{acc}[v{i}]xfade=transition=fade:duration={fade:.4f}:offset={played:.4f}{nxt}"
+                )
+            else:
+                # concat re-times its output to 1/1000000; xfade needs both of its inputs
+                # on the same timebase, so put it back on the segments' 1/30.
+                parts.append(f"{acc}[v{i}]concat=n=2:v=1:a=0,settb=1/30,fps=30{nxt}")
+            played += segments[i].duration_s
+            acc = nxt
+        current = acc
 
     if request.burn_captions and subtitle_name is not None:
         # Bare relative names — ffmpeg runs with its cwd set to the render
@@ -168,6 +243,48 @@ def build_video_filtergraph(
         parts.append(f"{current}null[vout]")
 
     return ";".join(parts)
+
+
+def _split_chain(
+    source_label: str,
+    index: int,
+    segment: CropSegment,
+    path: CropPath,
+    out_w: int,
+    out_h: int,
+) -> list[str]:
+    """Two people, one above the other: each gets a half of the frame, left person on top.
+
+    Every pane is a window around one face, sized to head and shoulders and kept inside
+    the source, scaled to fill half the output. A thin dark bar marks the seam.
+    """
+    pane_h = out_h // 2
+    aspect = out_w / pane_h
+    src_w, src_h = path.source_width, path.source_height
+
+    windows: list[tuple[int, int, int, int]] = []
+    for pane in sorted(segment.split, key=lambda p: p.cx):
+        width = min(max(pane.face_w * SPLIT_WINDOW_FACES, src_w * 0.22), src_w * 0.6)
+        height = width / aspect
+        if height > src_h:
+            height, width = float(src_h), src_h * aspect
+        width_i, height_i = int(width) // 2 * 2, int(height) // 2 * 2
+        x0 = int(min(max(pane.cx - width_i / 2, 0), src_w - width_i))
+        y0 = int(min(max(pane.cy - 0.45 * height_i, 0), src_h - height_i))
+        windows.append((width_i, height_i, x0, y0))
+
+    (tw, th, tx, ty), (bw, bh, bx, by) = windows
+    bar = max(4, round(out_h * 0.003))
+    return [
+        f"{source_label}split=2[sa{index}][sb{index}]",
+        f"[sa{index}]crop={tw}:{th}:{tx}:{ty},scale={out_w}:{pane_h}:flags=lanczos,setsar=1[pt{index}]",
+        f"[sb{index}]crop={bw}:{bh}:{bx}:{by},scale={out_w}:{pane_h}:flags=lanczos,setsar=1[pb{index}]",
+        (
+            f"[pt{index}][pb{index}]vstack=inputs=2,"
+            f"drawbox=x=0:y={pane_h - bar // 2}:w={out_w}:h={bar}:color=black@0.85:t=fill,"
+            f"setsar=1,format=yuv420p[v{index}]"
+        ),
+    ]
 
 
 def _fit_chain(source_label: str, index: int, out_w: int, out_h: int) -> list[str]:
@@ -524,6 +641,7 @@ def export_clip(
             width=out_w,
             height=out_h,
             time_offset_s=request.start_s,
+            seam_windows=split_windows(request),
         )
         render_cwd, subtitle_name, fonts_name = ffmpeg.relative_filter_workspace(
             ass_path, captions_module.FONT_DIR

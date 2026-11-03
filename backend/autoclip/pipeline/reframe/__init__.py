@@ -27,6 +27,7 @@ from .croppath import (
     CropKeyframe,
     CropPath,
     CropSegment,
+    SplitPane,
     Strategy,
     centre_crop,
     target_crop_size,
@@ -371,6 +372,17 @@ def _wide_segment(
     spread = right - left
 
     if spread > crop_w * FIT_IF_SPREAD_EXCEEDS:
+        # Exactly two people too far apart for one crop: record where each one is, so the
+        # export can stack them (a split screen) where its rules allow, instead of
+        # showing a tiny wide shot. ``fit`` stays set as the fallback layout.
+        panes = (
+            [
+                SplitPane(cx=(m[0] + m[1]) / 2, cy=m[2], face_w=m[1] - m[0])
+                for m in sorted(track_means, key=lambda m: m[0])
+            ]
+            if len(track_means) == 2
+            else []
+        )
         return CropSegment(
             start_s=start_s,
             end_s=end_s,
@@ -379,6 +391,7 @@ def _wide_segment(
             keyframes=[CropKeyframe(t=start_s, x=0.0, y=0.0)],
             strategy=Strategy.WIDE,
             fit=True,
+            split=panes,
         )
 
     centre_x = (left + right) / 2

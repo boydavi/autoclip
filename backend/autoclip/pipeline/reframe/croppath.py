@@ -57,6 +57,15 @@ class CropKeyframe:
 
 
 @dataclass
+class SplitPane:
+    """One person's half of a split-screen layout: face centre and width, source pixels."""
+
+    cx: float
+    cy: float
+    face_w: float
+
+
+@dataclass
 class CropSegment:
     start_s: float
     end_s: float
@@ -72,6 +81,11 @@ class CropSegment:
     #: wider than any crop of the target ratio can hold — cropping there would
     #: cut someone out of frame, which the acceptance bar forbids.
     fit: bool = False
+    #: Two panes (left person first) when exactly two people can be shown stacked,
+    #: one above the other. Only a candidate: ``split_on`` says whether this
+    #: segment actually renders that way (see ``plan_split_layout``).
+    split: list[SplitPane] = field(default_factory=list)
+    split_on: bool = False
 
     @property
     def duration_s(self) -> float:
@@ -127,6 +141,8 @@ class CropPath:
                     keyframes=keyframes,
                     strategy=Strategy(raw.get("strategy", "general")),
                     zoom=raw.get("zoom", 0.0),
+                    split=[SplitPane(**p) for p in raw.get("split", [])],
+                    split_on=raw.get("split_on", False),
                     fit=raw.get("fit", False),
                 )
             )
@@ -340,6 +356,8 @@ def adapt_crop_path(
                     strategy=seg.strategy,
                     zoom=seg.zoom,
                     fit=seg.fit,
+                    split=list(seg.split),
+                    split_on=seg.split_on,
                 )
             )
             continue
@@ -364,6 +382,8 @@ def adapt_crop_path(
                 strategy=seg.strategy,
                 zoom=seg.zoom,
                 fit=seg.fit,
+                split=list(seg.split),
+                split_on=seg.split_on,
             )
         )
 
@@ -372,6 +392,85 @@ def adapt_crop_path(
         source_height=path.source_height,
         segments=new_segments,
     )
+
+
+# --------------------------------------------------------------------------
+# Split-screen policy
+# --------------------------------------------------------------------------
+
+#: The clip opens on the normal framing; a split only starts after the hook has landed.
+SPLIT_MIN_START_S = 2.0
+#: A split is a change of pace, not the whole clip.
+SPLIT_MAX_SHARE = 0.65
+#: Shorter than this, a layout change is a flicker rather than a shot.
+SPLIT_MIN_LEN_S = 1.0
+
+
+def plan_split_layout(
+    segments: list[CropSegment],
+    *,
+    min_start_s: float = SPLIT_MIN_START_S,
+    max_share: float = SPLIT_MAX_SHARE,
+    min_len_s: float = SPLIT_MIN_LEN_S,
+) -> list[CropSegment]:
+    """Decide which two-person segments really render as a split screen.
+
+    Returns a new list; a segment is cut in two where the rules need it. Candidates
+    are segments carrying two panes. The rules keep the split a variation:
+
+    * never in the first ``min_start_s`` seconds (the clip opens on normal framing);
+    * never a stretch shorter than ``min_len_s``;
+    * at most ``max_share`` of the clip, taken from the end of the candidates (so the
+      earliest part of a long two-person stretch keeps the normal framing).
+    """
+    out = [replace(s, split_on=False, split=list(s.split)) for s in segments]
+    if not out:
+        return out
+    total = out[-1].end_s
+
+    def cut(index: int, at: float) -> None:
+        seg = out[index]
+        head = replace(seg, end_s=at, split_on=False)
+        tail = replace(seg, start_s=at, split_on=False)
+        out[index : index + 1] = [head, tail]
+
+    # 1. nothing before min_start_s: cut a candidate that straddles it.
+    for i, seg in enumerate(out):
+        if len(seg.split) == 2 and seg.start_s < min_start_s < seg.end_s:
+            cut(i, min_start_s)
+            break
+
+    for seg in out:
+        seg.split_on = (
+            len(seg.split) == 2
+            and seg.start_s >= min_start_s - 1e-6
+            and seg.duration_s >= min_len_s
+        )
+
+    # 2. cap the share of the clip, trimming from the start of the split stretches.
+    allowed = max_share * total
+    excess = sum(s.duration_s for s in out if s.split_on) - allowed
+    i = 0
+    while excess > 1e-6 and i < len(out):
+        seg = out[i]
+        if seg.split_on:
+            if seg.duration_s - excess >= min_len_s:
+                cut(i, seg.start_s + excess)
+                out[i].split_on = False
+                out[i + 1].split_on = True
+                excess = 0.0
+            else:
+                excess -= seg.duration_s
+                seg.split_on = False
+        i += 1
+    return out
+
+
+def layout_of(segment: CropSegment) -> str:
+    """"split", "fit" or "crop": how a planned segment is drawn."""
+    if segment.split_on and len(segment.split) == 2:
+        return "split"
+    return "fit" if segment.fit else "crop"
 
 
 # --------------------------------------------------------------------------

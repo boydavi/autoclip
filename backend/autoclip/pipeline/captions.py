@@ -248,11 +248,14 @@ def build_ass(
     width: int,
     height: int,
     time_offset_s: float = 0.0,
+    seam_windows: list[tuple[float, float]] | None = None,
 ) -> pysubs2.SSAFile:
     """Build an ASS subtitle file for a clip.
 
     ``time_offset_s`` is subtracted from every timestamp, so absolute transcript
-    times become clip-relative ones.
+    times become clip-relative ones. ``seam_windows`` are clip-relative stretches
+    drawn as a split screen: captions that start inside one are centred on the seam
+    between the two halves instead of sitting in the lower third.
 
     Preconditions:
         words are in chronological order and carry start/end timings.
@@ -275,6 +278,13 @@ def build_ass(
             subs.events.extend(_per_word_events(group, style, time_offset_s))
         else:
             subs.events.append(_static_event(group, style, time_offset_s))
+
+    if seam_windows:
+        centre = f"{{\\an5\\pos({width // 2},{height // 2})}}"
+        for event in subs.events:
+            started = event.start / 1000
+            if any(a - 0.05 <= started < b for a, b in seam_windows):
+                event.text = centre + event.text
 
     return subs
 
@@ -375,9 +385,13 @@ def write_ass(
     width: int,
     height: int,
     time_offset_s: float = 0.0,
+    seam_windows: list[tuple[float, float]] | None = None,
 ) -> Path:
     """Render captions to an .ass file and return its path."""
-    subs = build_ass(words, style, width=width, height=height, time_offset_s=time_offset_s)
+    subs = build_ass(
+        words, style, width=width, height=height, time_offset_s=time_offset_s,
+        seam_windows=seam_windows,
+    )
     path.parent.mkdir(parents=True, exist_ok=True)
     subs.save(str(path), encoding="utf-8")
     return path
