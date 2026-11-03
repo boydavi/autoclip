@@ -25,6 +25,10 @@ class GroqProvider(OpenAIProvider):
     name = "groq"
     requires_key = True
     suggested_models = SUGGESTED_MODELS
+    # gpt-oss reasons before answering and Groq caps the reply at 3,072 tokens; at
+    # the default effort a long window spends all of it thinking and returns an
+    # empty answer (seen live). Low effort answers in ~1K tokens.
+    request_extras = {"extra_body": {"reasoning_effort": "low"}}  # noqa: RUF012
 
     def __init__(self, model: str = "", *, api_key: str | None = None, base_url: str | None = None):
         super().__init__(model or DEFAULT_MODEL, api_key=api_key, base_url=base_url or BASE_URL)

@@ -37,6 +37,8 @@ class OpenAIProvider(LLMProvider):
     name = "openai"
     requires_key = True
     suggested_models: list[str] = SUGGESTED_MODELS
+    #: Extra keyword arguments merged into every chat request (vendor tuning).
+    request_extras: dict = {}  # noqa: RUF012 - read-only class default
 
     def __init__(self, model: str = "", *, api_key: str | None = None, base_url: str | None = None):
         super().__init__(model or DEFAULT_MODEL, api_key=api_key, base_url=base_url)
@@ -76,6 +78,7 @@ class OpenAIProvider(LLMProvider):
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
             ],
+            **self.request_extras,
         }
         # Only OpenAI's own endpoint reliably honours this; other vendors 400 on
         # it, so a failed request is retried once without it.

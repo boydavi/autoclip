@@ -98,6 +98,8 @@ def test_chat_request_reaches_groq_and_reply_content_is_returned(
     assert seen["auth"] == "Bearer gsk-x"
     assert seen["body"]["model"] == "openai/gpt-oss-120b"
     assert seen["body"]["messages"][-1]["role"] == "user"
+    # Without this, gpt-oss can spend the whole reply budget reasoning (empty answer).
+    assert seen["body"]["reasoning_effort"] == "low"
 
 
 def test_strict_json_rejection_is_retried_in_plain_mode(monkeypatch: pytest.MonkeyPatch) -> None:
