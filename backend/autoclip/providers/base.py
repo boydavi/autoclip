@@ -275,11 +275,17 @@ Specific to the clip's topic; no generic tags such as #fyp.
 
 `mood` — the emotional register of what is SAID, which chooses the background music.
 Exactly one of "energetic", "calm", "dramatic". Judge the message, not the speaking
-speed:
-- "dramatic": a reveal, a hard truth, tension, a turning point, a serious or emotional
-  statement, anything where the music should add weight.
-- "energetic": motivation, humour, excitement, urgency, a fast payoff.
-- "calm": reflection, gentle advice, reassurance, a soft or intimate message.
+speed. Most clips are NOT dramatic: use "dramatic" only for a genuine emotional or
+high-stakes moment, and spread the other clips across the three moods honestly.
+- "dramatic": a real turning point, a painful or hard truth, a confession, a
+  dangerous or life-changing event, tension about to break. The listener should feel
+  weight. Explaining an idea, even an important one, is not dramatic.
+- "energetic": motivation, a call to action, humour, excitement, urgency, a quick
+  punchy payoff.
+- "calm": the default for explanation, teaching, science or how-things-work content,
+  reflection, gentle advice, reassurance, or a soft intimate message.
+Ask yourself: is the speaker moving the listener's emotions (dramatic or energetic),
+or informing and soothing them (calm)?
 """
 
 
