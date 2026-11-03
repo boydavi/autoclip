@@ -15,8 +15,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import logging
 import os
+import subprocess
 import sys
 import tempfile
 import time
@@ -34,6 +36,55 @@ class _Capture(logging.Handler):
         self.lines.append(record.getMessage())
 
 
+def _probe(path: Path) -> dict:
+    out = subprocess.run(
+        ["ffprobe", "-v", "error", "-print_format", "json", "-show_streams", "-show_format",
+         str(path)],
+        capture_output=True, text=True, check=False,
+    ).stdout
+    return json.loads(out) if out else {}
+
+
+def _render_checks(clips) -> list[tuple[str, bool, str]]:
+    from autoclip.db import store
+
+    rows = []
+    for clip in clips:
+        done = [e for e in store.list_exports(clip.id) if e.status == "done"]
+        rows.append((clip, done[0] if done else None))
+    files = [(c, Path(e.path)) for c, e in rows if e is not None]
+    info = [(c, p, _probe(p)) for c, p in files if p.exists()]
+
+    def video(meta):
+        return next((s for s in meta.get("streams", []) if s["codec_type"] == "video"), {})
+
+    def has_audio(meta):
+        return any(s["codec_type"] == "audio" for s in meta.get("streams", []))
+
+    def duration_ok(clip, meta):
+        return abs(float(meta["format"]["duration"]) - clip.duration_s) <= 1.5
+
+    return [
+        ("every clip exported", bool(rows) and len(files) == len(rows),
+         f"{len(files)}/{len(rows)}"),
+        ("export files exist and are non-empty",
+         bool(files) and all(p.exists() and p.stat().st_size > 50_000 for _, p in files),
+         ", ".join(f"{p.stat().st_size / 1e6:.1f}MB" for _, p in files if p.exists())),
+        ("output is 1080x1920 (9:16)",
+         bool(info) and all(
+             (video(m).get("width"), video(m).get("height")) == (1080, 1920) for *_, m in info
+         ), ""),
+        ("output has an audio track", bool(info) and all(has_audio(m) for *_, m in info), ""),
+        ("output duration matches the clip (+/-1.5s)",
+         bool(info) and all(duration_ok(c, m) for c, _, m in info), ""),
+        ("post caption .txt written beside each clip",
+         bool(files) and all(
+             p.with_suffix(".txt").exists() or not c.post_caption for c, p in files
+         ) and any(p.with_suffix(".txt").exists() for _, p in files),
+         ""),
+    ]
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("media", type=Path)
@@ -45,6 +96,10 @@ def main() -> int:
     parser.add_argument("--model", default=None, help="LLM model (default per provider)")
     parser.add_argument("--groq-model", default="whisper-large-v3-turbo")
     parser.add_argument("--max-clips", type=int, default=5)
+    parser.add_argument(
+        "--render", action="store_true",
+        help="also export the clips (CPU heavy) and verify the output files",
+    )
     args = parser.parse_args()
 
     keys = ["AUTOCLIP_GROQ_KEY"] + (["AUTOCLIP_ANTHROPIC_KEY"] if args.llm == "anthropic" else [])
@@ -81,7 +136,7 @@ def main() -> int:
     settings.providers[args.llm].model = model
     settings.whisper.provider = "groq"
     settings.whisper.groq_model = args.groq_model
-    settings.export.scan_only = True
+    settings.export.scan_only = not args.render
     settings.clips.max_clips = args.max_clips
 
     windows = _window_count(source.duration_s)
@@ -143,6 +198,8 @@ def main() -> int:
         ("no LLM window failed", not any("LLM windows failed" in w or "failed (" in w
                                          for w in warnings), ""),
     ]
+    if args.render:
+        checks += _render_checks(clips)
 
     print("\n=== DRILL RESULT ===")
     for name, ok, detail in checks:
