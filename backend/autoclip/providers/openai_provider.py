@@ -122,7 +122,15 @@ class OpenAIProvider(LLMProvider):
 
 def _is_unsupported_parameter(exc: Exception) -> bool:
     lowered = str(exc).lower()
-    return "response_format" in lowered or "unsupported" in lowered or "unrecognized" in lowered
+    return (
+        "response_format" in lowered
+        or "unsupported" in lowered
+        or "unrecognized" in lowered
+        # Groq's strict JSON mode 400s when the model's output is not valid JSON;
+        # plain mode lets the tolerant parser salvage it.
+        or "failed to validate json" in lowered
+        or "json_validate_failed" in lowered
+    )
 
 
 def _translate(exc: Exception, provider: str, model: str) -> ProviderError:

@@ -98,3 +98,40 @@ def test_chat_request_reaches_groq_and_reply_content_is_returned(
     assert seen["auth"] == "Bearer gsk-x"
     assert seen["body"]["model"] == "openai/gpt-oss-120b"
     assert seen["body"]["messages"][-1]["role"] == "user"
+
+
+def test_strict_json_rejection_is_retried_in_plain_mode(monkeypatch: pytest.MonkeyPatch) -> None:
+    import openai
+
+    bodies: list[dict] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        body = json.loads(request.content)
+        bodies.append(body)
+        if "response_format" in body:
+            return httpx.Response(400, json={"error": {
+                "message": "Failed to validate JSON. Please adjust your prompt.",
+                "type": "invalid_request_error", "code": "json_validate_failed",
+                "failed_generation": "```json\n{\"clips\": []}\n```",
+            }})
+        return httpx.Response(200, json={
+            "id": "c1", "object": "chat.completion", "created": 0, "model": "m",
+            "choices": [{"index": 0, "finish_reason": "stop",
+                         "message": {"role": "assistant", "content": '{"clips": []}'}}],
+            "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        })
+
+    real = openai.AsyncOpenAI
+
+    class Patched(real):
+        def __init__(self, **kw):
+            kw["http_client"] = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+            super().__init__(**kw)
+
+    monkeypatch.setattr(openai, "AsyncOpenAI", Patched)
+
+    text = asyncio.run(GroqProvider(api_key="gsk-x")._complete("sys", "user", DetectionConfig()))
+
+    assert text == '{"clips": []}'
+    assert len(bodies) == 2
+    assert "response_format" in bodies[0] and "response_format" not in bodies[1]
