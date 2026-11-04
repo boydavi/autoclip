@@ -268,6 +268,16 @@ def _listener_dim(segment: CropSegment, out_w: int, pane_h: int) -> str:
     return "".join(f"{box}," for box in boxes)
 
 
+def _eased(points: list[tuple[float, float]]) -> str:
+    """An ffmpeg expression in ``t``: the value moving linearly between (time, value) points,
+    holding the first value before the first point and the last value after the last."""
+    expr = f"{points[-1][1]:.2f}"
+    for (t0, v0), (t1, v1) in reversed(list(zip(points, points[1:], strict=False))):
+        span = max(t1 - t0, 0.05)
+        expr = f"if(lt(t,{t1:.3f}),lerp({v0:.2f},{v1:.2f},clip((t-{t0:.3f})/{span:.3f},0,1)),{expr})"
+    return expr
+
+
 def _split_chain(
     source_label: str,
     index: int,
@@ -285,15 +295,23 @@ def _split_chain(
     aspect = out_w / pane_h
     src_w, src_h = path.source_width, path.source_height
 
-    windows: list[tuple[int, int, int, int]] = []
+    windows: list[tuple[int, int, object, object]] = []
     for pane in sorted(segment.split, key=lambda p: p.cx):
         width = min(max(pane.face_w * SPLIT_WINDOW_FACES, src_w * 0.22), src_w * 0.6)
         height = width / aspect
         if height > src_h:
             height, width = float(src_h), src_h * aspect
         width_i, height_i = int(width) // 2 * 2, int(height) // 2 * 2
-        x0 = int(min(max(pane.cx - width_i / 2, 0), src_w - width_i))
-        y0 = int(min(max(pane.cy - 0.45 * height_i, 0), src_h - height_i))
+        def corner(cx: float, cy: float) -> tuple[float, float]:
+            return (min(max(cx - width_i / 2, 0), src_w - width_i),
+                    min(max(cy - 0.45 * height_i, 0), src_h - height_i))
+
+        if len(pane.path) >= 2:
+            # the person moves: the window follows, easing between the measured points
+            marks = [(max(0.0, t - segment.start_s), *corner(cx, cy)) for t, cx, cy in sorted(pane.path)]
+            x0, y0 = _eased([(t, x) for t, x, _ in marks]), _eased([(t, y) for t, _, y in marks])
+        else:
+            x0, y0 = (f"{int(v)}" for v in corner(pane.cx, pane.cy))
         windows.append((width_i, height_i, x0, y0))
 
     (tw, th, tx, ty), (bw, bh, bx, by) = windows
@@ -301,8 +319,8 @@ def _split_chain(
     dim = _listener_dim(segment, out_w, pane_h)
     return [
         f"{source_label}split=2[sa{index}][sb{index}]",
-        f"[sa{index}]crop={tw}:{th}:{tx}:{ty},scale={out_w}:{pane_h}:flags=lanczos,setsar=1[pt{index}]",
-        f"[sb{index}]crop={bw}:{bh}:{bx}:{by},scale={out_w}:{pane_h}:flags=lanczos,setsar=1[pb{index}]",
+        f"[sa{index}]crop={tw}:{th}:x='{tx}':y='{ty}',scale={out_w}:{pane_h}:flags=lanczos,setsar=1[pt{index}]",
+        f"[sb{index}]crop={bw}:{bh}:x='{bx}':y='{by}',scale={out_w}:{pane_h}:flags=lanczos,setsar=1[pb{index}]",
         (
             f"[pt{index}][pb{index}]vstack=inputs=2,{dim}"
             f"drawbox=x=0:y={pane_h - bar // 2}:w={out_w}:h={bar}:color=black@0.85:t=fill,"

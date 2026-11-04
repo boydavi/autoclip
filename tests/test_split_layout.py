@@ -326,3 +326,62 @@ def test_removing_overlaps_keeps_every_word_and_the_emphasis():
     assert (BS + "c" + captions.ass_colour_override(style.accent)) in text               # spoken-word highlight kept
     for word in ("FEELINGS", "OF", "YOUR", "EMOTIONS", "FUTURE", "NOW.", "BODY"):
         assert word in text
+
+
+# ------------------------------------------------ panes that follow the person
+
+
+def test_the_eased_expression_holds_the_ends_and_moves_between_points():
+    expr = export._eased([(0.0, 100.0), (2.0, 300.0)])
+    assert "lerp(100.00,300.00" in expr and expr.endswith(",300.00)")
+    assert export._eased([(1.0, 50.0), (3.0, 90.0), (5.0, 90.0)]).count("lerp(") == 2
+
+
+def test_a_pane_path_survives_the_crop_path_round_trip():
+    pane = SplitPane(cx=320, cy=300, face_w=80, path=[(0.0, 300.0, 300.0), (3.0, 420.0, 310.0)])
+    seg = wide_seg(3, 9, [pane, PANES[1]])
+    again = CropPath.from_dict(CropPath(1280, 720, [seg]).to_dict())
+    assert [tuple(p) for p in again.segments[0].split[0].path] == [(0.0, 300.0, 300.0), (3.0, 420.0, 310.0)]
+    assert again.segments[0].split[1].path == []
+
+
+@pytest.fixture(scope="module")
+def mover_video(tmp_path_factory) -> Path:
+    """Grey frame; a white square walks left to right (x 200 -> 560) in the left half; one stays still on the right."""
+    if not shutil.which("ffmpeg"):
+        pytest.skip("ffmpeg not installed")
+    path = tmp_path_factory.mktemp("mover") / "mover.mp4"
+    subprocess.run(
+        ["ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-f", "lavfi", "-i", "color=c=gray:size=1280x720:rate=30:duration=9",
+         "-f", "lavfi", "-i", "color=c=white:size=40x40:rate=30:duration=9",
+         "-filter_complex", "[0][1]overlay=x='180+360*min(t/8,1)':y=280:eof_action=pass,"
+                            "drawbox=x=940:y=280:w=40:h=40:color=white:t=fill", "-pix_fmt", "yuv420p", str(path)],
+        check=True,
+    )
+    return path
+
+
+def _white_centroid_x(video: Path, t: float, top: bool = True) -> float:
+    raw = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", str(t), "-i", str(video), "-frames:v", "1",
+                          "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True, check=True).stdout
+    frame = np.frombuffer(raw, dtype=np.uint8).reshape(1920, 1080)
+    half = frame[:940] if top else frame[980:]
+    _ys, xs = np.nonzero(half > 235)
+    return float(xs.mean()) if len(xs) else -1.0
+
+
+def test_real_render_a_following_pane_keeps_the_mover_centred(mover_video, tmp_path):
+    moving = SplitPane(cx=312, cy=300, face_w=80, path=[(2.5, 312.5, 300.0), (8.0, 560.0, 300.0)])
+    still = SplitPane(cx=960, cy=300, face_w=80)
+    seg_follow = wide_seg(2.5, 9, [moving, still])
+    seg_fixed = wide_seg(2.5, 9, [SplitPane(cx=312, cy=300, face_w=80), still])
+    followed = render(mover_video, [crop_seg(0, 2.5), seg_follow], tmp_path / "f.mp4")
+    fixed = render(mover_video, [crop_seg(0, 2.5), seg_fixed], tmp_path / "s.mp4")
+    # the pane window is 336 px wide of the 1280 source -> the mover walks out of a fixed window
+    drift_fixed = abs(_white_centroid_x(fixed, 8.0) - _white_centroid_x(fixed, 3.5))
+    drift_follow = abs(_white_centroid_x(followed, 8.0) - _white_centroid_x(followed, 3.5))
+    assert drift_fixed > 200                                   # a fixed window loses the person
+    assert drift_follow < 0.35 * drift_fixed                   # a following window keeps them put
+    assert abs(_white_centroid_x(followed, 8.0) - 540) < 140   # and near the middle of the pane
+    # the person who does not move is unaffected by the other pane following
+    assert abs(_white_centroid_x(followed, 8.0, top=False) - _white_centroid_x(fixed, 8.0, top=False)) < 2

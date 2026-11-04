@@ -63,6 +63,9 @@ class SplitPane:
     cx: float
     cy: float
     face_w: float
+    #: Where this person's face goes over the stretch: (clip_t, cx, cy) in source pixels. Empty =
+    #: stay at (cx, cy). The pane's window follows it, easing between points.
+    path: list[tuple[float, float, float]] = field(default_factory=list)
 
 
 @dataclass
