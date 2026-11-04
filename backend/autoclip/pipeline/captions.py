@@ -93,6 +93,10 @@ class CaptionStyle:
     boxed: bool = False
     box_colour: str = "#000000"
     box_alpha: int = 40
+    #: Colour of key words the edit plan marked for emphasis (distinct from the accent).
+    emphasis_colour: str = "#FF5A2E"
+    #: Extra growth (percentage points) of an emphasised word while it is being spoken.
+    emphasis_extra_scale: int = 12
 
     @property
     def font_path(self) -> Path:
@@ -249,13 +253,15 @@ def build_ass(
     height: int,
     time_offset_s: float = 0.0,
     seam_windows: list[tuple[float, float]] | None = None,
+    emphasis_spans: list[tuple[float, float]] | None = None,
 ) -> pysubs2.SSAFile:
     """Build an ASS subtitle file for a clip.
 
     ``time_offset_s`` is subtracted from every timestamp, so absolute transcript
     times become clip-relative ones. ``seam_windows`` are clip-relative stretches
     drawn as a split screen: captions that start inside one are centred on the seam
-    between the two halves instead of sitting in the lower third.
+    between the two halves instead of sitting in the lower third. ``emphasis_spans`` are
+    (start, end) times of key phrases: their words are drawn in the emphasis colour.
 
     Preconditions:
         words are in chronological order and carry start/end timings.
@@ -275,9 +281,11 @@ def build_ass(
         if style.animation == "karaoke":
             subs.events.append(_karaoke_event(group, style, time_offset_s))
         elif style.animation == "scale" and style.accent:
-            subs.events.extend(_per_word_events(group, style, time_offset_s))
+            subs.events.extend(_per_word_events(group, style, time_offset_s, emphasis_spans))
         else:
-            subs.events.append(_static_event(group, style, time_offset_s))
+            subs.events.append(_static_event(group, style, time_offset_s, emphasis_spans))
+
+    subs.events = _without_overlaps(subs.events)
 
     if seam_windows:
         centre = f"{{\\an5\\pos({width // 2},{height // 2})}}"
@@ -287,6 +295,24 @@ def build_ass(
                 event.text = centre + event.text
 
     return subs
+
+
+def _without_overlaps(events: list[pysubs2.SSAEvent], *, min_ms: int = 40) -> list[pysubs2.SSAEvent]:
+    """Never two caption lines on screen at once.
+
+    ASR word times can overlap (a word starting before the previous one ends), so the last
+    event of one group may still be showing when the next group's first event starts. A new
+    line replaces the old one: the earlier event is cut at the later one's start, and an
+    event left with no time at all is dropped. Content and animation are untouched.
+    """
+    ordered = sorted(events, key=lambda e: e.start)
+    cut: list[pysubs2.SSAEvent] = []
+    for earlier, later in zip(ordered, ordered[1:], strict=False):
+        if earlier.end > later.start:
+            earlier.end = later.start
+            cut.append(earlier)
+    emptied = {id(e) for e in cut if e.end - e.start < min_ms}
+    return [e for e in ordered if id(e) not in emptied]
 
 
 def _build_ass_style(style: CaptionStyle, *, height: int, scale: float) -> pysubs2.SSAStyle:
@@ -322,9 +348,22 @@ def _event(start_s: float, end_s: float, text: str, offset: float) -> pysubs2.SS
     )
 
 
-def _static_event(group: CaptionGroup, style: CaptionStyle, offset: float) -> pysubs2.SSAEvent:
-    text = " ".join(_text_of(w, style) for w in group.words)
-    return _event(group.start, group.end, text, offset)
+def _is_emphasised(word: Word, spans: list[tuple[float, float]] | None) -> bool:
+    if not spans:
+        return False
+    mid = (word.start + word.end) / 2
+    return any(a - 0.02 <= mid <= b + 0.02 for a, b in spans)
+
+
+def _static_event(
+    group: CaptionGroup, style: CaptionStyle, offset: float, spans: list[tuple[float, float]] | None = None
+) -> pysubs2.SSAEvent:
+    colour = f"\\c{ass_colour_override(style.emphasis_colour)}"
+    parts = [
+        f"{{{colour}}}{_text_of(w, style)}{{\\r}}" if _is_emphasised(w, spans) else _text_of(w, style)
+        for w in group.words
+    ]
+    return _event(group.start, group.end, " ".join(parts), offset)
 
 
 def _karaoke_event(group: CaptionGroup, style: CaptionStyle, offset: float) -> pysubs2.SSAEvent:
@@ -348,7 +387,7 @@ def _karaoke_event(group: CaptionGroup, style: CaptionStyle, offset: float) -> p
 
 
 def _per_word_events(
-    group: CaptionGroup, style: CaptionStyle, offset: float
+    group: CaptionGroup, style: CaptionStyle, offset: float, spans: list[tuple[float, float]] | None = None
 ) -> list[pysubs2.SSAEvent]:
     """Emit one event per word, highlighting the active one.
 
@@ -356,6 +395,7 @@ def _per_word_events(
     the emphasised word changes between them.
     """
     accent_tag = f"\\c{ass_colour_override(style.accent or style.primary)}"
+    emphasis_tag = f"\\c{ass_colour_override(style.emphasis_colour)}"
     scale = style.scale_percent
     events: list[pysubs2.SSAEvent] = []
 
@@ -363,8 +403,14 @@ def _per_word_events(
         rendered: list[str] = []
         for index, other in enumerate(group.words):
             text = _text_of(other, style)
-            if index == active:
+            key = _is_emphasised(other, spans)
+            if index == active and key:
+                big = scale + style.emphasis_extra_scale
+                rendered.append(f"{{{emphasis_tag}\\fscx{big}\\fscy{big}}}{text}{{\\r}}")
+            elif index == active:
                 rendered.append(f"{{{accent_tag}\\fscx{scale}\\fscy{scale}}}{text}{{\\r}}")
+            elif key:
+                rendered.append(f"{{{emphasis_tag}}}{text}{{\\r}}")
             else:
                 rendered.append(text)
 

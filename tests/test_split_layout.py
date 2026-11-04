@@ -258,3 +258,71 @@ def test_real_render_dims_only_the_listener(source_video, tmp_path):
                           "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True, check=True).stdout
     frame = np.frombuffer(raw, dtype=np.uint8).reshape(1920, 1080).astype(float)
     assert frame[1400:1500].mean() < 0.8 * frame[400:500].mean()    # bottom (listener) is darker
+
+
+# ------------------------------------------------------------- emphasis colour on key words
+
+BS = chr(92)
+
+
+def _words():
+    from autoclip.pipeline.transcript import Word
+
+    return [Word("so", 0.0, 0.3), Word("feel", 0.3, 0.6), Word("the", 0.6, 0.8), Word("future", 0.8, 1.2)]
+
+
+def test_key_words_get_the_emphasis_colour_and_grow_when_spoken():
+    style = captions.get_style("bold_pop")
+    subs = captions.build_ass(_words(), style, width=1080, height=1920, emphasis_spans=[(0.8, 1.2)])
+    emph = BS + "c" + captions.ass_colour_override(style.emphasis_colour)
+    last = subs.events[-1].text                         # "future" is the spoken word
+    assert emph in last and f"{BS}fscx{style.scale_percent + style.emphasis_extra_scale}" in last
+    before = subs.events[-2].text                       # while "the" is spoken, "future" is already marked
+    assert emph in before and f"{BS}fscx{style.scale_percent}" in before
+
+
+def test_without_emphasis_the_captions_are_unchanged():
+    style = captions.get_style("bold_pop")
+    plain = captions.build_ass(_words(), style, width=1080, height=1920)
+    marked = captions.build_ass(_words(), style, width=1080, height=1920, emphasis_spans=[(50.0, 51.0)])
+    assert [e.text for e in plain.events] == [e.text for e in marked.events]
+
+
+def test_static_styles_colour_the_key_words_too():
+    style = captions.get_style("clean_lower")
+    subs = captions.build_ass(_words(), style, width=1080, height=1920, emphasis_spans=[(0.8, 1.2)])
+    assert BS + "c" + captions.ass_colour_override(style.emphasis_colour) in subs.events[-1].text
+
+
+# ------------------------------------------------- one caption line at a time
+
+
+def _overlapping_words():
+    from autoclip.pipeline.transcript import Word
+
+    # "of" starts before "feelings" ends; "your" starts before "now." ends (real ASR timing)
+    return [
+        Word("the", 4.19, 4.49), Word("feelings", 4.49, 4.89), Word("of", 4.47, 5.21), Word("your", 5.21, 5.39),
+        Word("emotions", 5.39, 5.99), Word("future", 6.0, 6.5), Word("now.", 6.5, 7.6), Word("your", 7.0, 7.3),
+        Word("body", 7.3, 7.9), Word("is", 7.9, 8.1),
+    ]
+
+
+@pytest.mark.parametrize("style_key", ["bold_pop", "clean_lower", "karaoke_fill", "boxed"])
+def test_never_two_caption_lines_at_once(style_key):
+    style = captions.get_style(style_key)
+    subs = captions.build_ass(_overlapping_words(), style, width=1080, height=1920)
+    ordered = sorted(subs.events, key=lambda e: e.start)
+    for a, b in zip(ordered, ordered[1:], strict=False):
+        assert a.end <= b.start, (a.start, a.end, b.start)
+    assert all(e.end > e.start for e in ordered)
+
+
+def test_removing_overlaps_keeps_every_word_and_the_emphasis():
+    style = captions.get_style("bold_pop")
+    marked = captions.build_ass(_overlapping_words(), style, width=1080, height=1920, emphasis_spans=[(5.39, 5.99)])
+    text = " ".join(e.text for e in marked.events)
+    assert (BS + "c" + captions.ass_colour_override(style.emphasis_colour)) in text      # emphasis kept
+    assert (BS + "c" + captions.ass_colour_override(style.accent)) in text               # spoken-word highlight kept
+    for word in ("FEELINGS", "OF", "YOUR", "EMOTIONS", "FUTURE", "NOW.", "BODY"):
+        assert word in text
