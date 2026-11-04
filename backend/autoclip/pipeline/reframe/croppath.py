@@ -86,6 +86,9 @@ class CropSegment:
     #: segment actually renders that way (see ``plan_split_layout``).
     split: list[SplitPane] = field(default_factory=list)
     split_on: bool = False
+    #: Who is talking while the split is on: (start_s, end_s, 0|1) clip-relative, 0 = the
+    #: left person (top pane), 1 = the right person. The other half is dimmed.
+    speaker_turns: list[tuple[float, float, int]] = field(default_factory=list)
 
     @property
     def duration_s(self) -> float:
@@ -143,6 +146,7 @@ class CropPath:
                     zoom=raw.get("zoom", 0.0),
                     split=[SplitPane(**p) for p in raw.get("split", [])],
                     split_on=raw.get("split_on", False),
+                    speaker_turns=[(float(a), float(b), int(c)) for a, b, c in raw.get("speaker_turns", [])],
                     fit=raw.get("fit", False),
                 )
             )
@@ -358,6 +362,7 @@ def adapt_crop_path(
                     fit=seg.fit,
                     split=list(seg.split),
                     split_on=seg.split_on,
+                    speaker_turns=list(seg.speaker_turns),
                 )
             )
             continue
@@ -384,6 +389,7 @@ def adapt_crop_path(
                 fit=seg.fit,
                 split=list(seg.split),
                 split_on=seg.split_on,
+                speaker_turns=list(seg.speaker_turns),
             )
         )
 
@@ -423,7 +429,7 @@ def plan_split_layout(
     * at most ``max_share`` of the clip, taken from the end of the candidates (so the
       earliest part of a long two-person stretch keeps the normal framing).
     """
-    out = [replace(s, split_on=False, split=list(s.split)) for s in segments]
+    out = [replace(s, split_on=False, split=list(s.split), speaker_turns=list(s.speaker_turns)) for s in segments]
     if not out:
         return out
     total = out[-1].end_s

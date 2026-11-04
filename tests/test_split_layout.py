@@ -226,3 +226,35 @@ def test_real_render_two_person_clip_does_not_open_on_a_split(source_video, tmp_
     assert probe(out)[2] == pytest.approx(9.0, abs=0.12)
     assert seam_ratio(out, 0.8) > 0.7                         # opening seconds: not a split
     assert seam_ratio(out, 7.5) < 0.4                         # later: split
+
+
+# ---------------------------------------------------- who is talking (listener dimmed)
+
+
+def test_the_listeners_half_is_dimmed_during_each_turn():
+    seg = wide_seg(4, 9)                                    # 5 of 9 s: inside the share cap
+    seg.speaker_turns = [(4.0, 6.0, 0), (6.0, 9.0, 1)]
+    graph = export.build_video_filtergraph(request([crop_seg(0, 4), seg]), subtitle_name=None)
+    top_listener = "drawbox=x=0:y=0:w=1080:h=960"          # the right person talks: top half dims
+    bottom_listener = "drawbox=x=0:y=960:w=1080:h=960"     # the left person talks: bottom half dims
+    assert "enable='between(t,0.000,2.000)'" in graph and bottom_listener in graph
+    assert "enable='between(t,2.000,5.000)'" in graph and top_listener in graph
+
+
+def test_no_turns_means_no_dimming_and_they_survive_the_round_trip():
+    graph = export.build_video_filtergraph(request([crop_seg(0, 3), wide_seg(3, 9)]), subtitle_name=None)
+    assert "black@0.38" not in graph
+    seg = wide_seg(3, 9)
+    seg.speaker_turns = [(3.0, 6.0, 1)]
+    again = CropPath.from_dict(CropPath(1280, 720, [seg]).to_dict())
+    assert again.segments[0].speaker_turns == [(3.0, 6.0, 1)]
+
+
+def test_real_render_dims_only_the_listener(source_video, tmp_path):
+    seg = wide_seg(2.5, 9)
+    seg.speaker_turns = [(2.5, 9.0, 0)]                    # the top person talks the whole stretch
+    out = render(source_video, [crop_seg(0, 2.5), seg], tmp_path / "d.mp4")
+    raw = subprocess.run(["ffmpeg", "-hide_banner", "-loglevel", "error", "-ss", "6", "-i", str(out), "-frames:v", "1",
+                          "-f", "rawvideo", "-pix_fmt", "gray", "-"], capture_output=True, check=True).stdout
+    frame = np.frombuffer(raw, dtype=np.uint8).reshape(1920, 1080).astype(float)
+    assert frame[1400:1500].mean() < 0.8 * frame[400:500].mean()    # bottom (listener) is darker

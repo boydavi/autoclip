@@ -245,6 +245,29 @@ def build_video_filtergraph(
     return ";".join(parts)
 
 
+#: How much the half of the person who is NOT talking is darkened.
+SPLIT_LISTENER_DIM = 0.38
+
+
+def _listener_dim(segment: CropSegment, out_w: int, pane_h: int) -> str:
+    """drawbox filters (with a trailing comma, or "") that darken the listener's half.
+
+    Turns are clip-relative; inside the segment's own trim the clock starts at its first
+    frame, so they are shifted by the segment start. Times are what ``enable`` compares.
+    """
+    boxes: list[str] = []
+    for start, end, speaker in segment.speaker_turns:
+        a, b = max(start, segment.start_s) - segment.start_s, min(end, segment.end_s) - segment.start_s
+        if b - a < 0.2:
+            continue
+        y = pane_h if speaker == 0 else 0      # the listener is the other half
+        boxes.append(
+            f"drawbox=x=0:y={y}:w={out_w}:h={pane_h}:color=black@{SPLIT_LISTENER_DIM}:t=fill:"
+            f"enable='between(t,{a:.3f},{b:.3f})'"
+        )
+    return "".join(f"{box}," for box in boxes)
+
+
 def _split_chain(
     source_label: str,
     index: int,
@@ -275,12 +298,13 @@ def _split_chain(
 
     (tw, th, tx, ty), (bw, bh, bx, by) = windows
     bar = max(4, round(out_h * 0.003))
+    dim = _listener_dim(segment, out_w, pane_h)
     return [
         f"{source_label}split=2[sa{index}][sb{index}]",
         f"[sa{index}]crop={tw}:{th}:{tx}:{ty},scale={out_w}:{pane_h}:flags=lanczos,setsar=1[pt{index}]",
         f"[sb{index}]crop={bw}:{bh}:{bx}:{by},scale={out_w}:{pane_h}:flags=lanczos,setsar=1[pb{index}]",
         (
-            f"[pt{index}][pb{index}]vstack=inputs=2,"
+            f"[pt{index}][pb{index}]vstack=inputs=2,{dim}"
             f"drawbox=x=0:y={pane_h - bar // 2}:w={out_w}:h={bar}:color=black@0.85:t=fill,"
             f"setsar=1,format=yuv420p[v{index}]"
         ),
