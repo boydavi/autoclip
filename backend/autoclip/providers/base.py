@@ -29,6 +29,8 @@ from typing import Any
 
 from pydantic import BaseModel, Field, ValidationError, field_validator
 
+from ..usage import Usage
+
 log = logging.getLogger(__name__)
 
 PROMPT_DIR = Path(__file__).resolve().parent.parent / "prompts"
@@ -174,6 +176,13 @@ class LLMProvider(ABC):
         self.model = model
         self.api_key = api_key
         self.base_url = base_url
+
+    @property
+    def usage(self) -> Usage:
+        """Tokens spent by this provider instance so far (providers that report usage fill it in)."""
+        if not hasattr(self, "_usage"):
+            self._usage = Usage()
+        return self._usage
 
     # -- to implement ------------------------------------------------------
 

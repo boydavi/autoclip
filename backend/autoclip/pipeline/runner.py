@@ -25,6 +25,7 @@ from ..db import store
 from ..db.models import Clip, Export, Job, Source, new_id, utcnow
 from ..db.models import Transcript as TranscriptRow
 from ..providers import build_provider, detection_config
+from ..usage import llm_cost_usd, whisper_cost_usd
 from . import Stage, captions, export, ffmpeg, highlights, prepare, transcribe
 from .prepare import Silence
 from .reframe import ReframeConfig, build_crop_path
@@ -359,6 +360,13 @@ class PipelineRunner:
             cancelled=self._is_cancelled,
         )
 
+        if self.settings.whisper.provider == "groq":
+            seconds = float(self.source.duration_s or 0.0)
+            store.add_job_usage(
+                self.job.id, transcribe_seconds=seconds,
+                cost_usd=whisper_cost_usd(self.settings.whisper.groq_model, seconds),
+            )
+
         if self.settings.whisper.diarization:
             from ..config import HF_TOKEN_KEY, get_secret
 
@@ -433,6 +441,12 @@ class PipelineRunner:
             on_progress=self._stage_progress(stage),
             concurrency=self.settings.provider(provider_name).concurrency,
             is_cancelled=self._is_cancelled,
+        )
+        # what the clip-selection calls cost (kept even if the job is cancelled right after)
+        used = provider.usage
+        store.add_job_usage(
+            self.job.id, calls=used.calls, input_tokens=used.input_tokens, output_tokens=used.output_tokens,
+            cost_usd=llm_cost_usd(provider.model, used.input_tokens, used.output_tokens),
         )
         # detect() returns early once cancelled; don't persist its partial result.
         self._check_cancelled()

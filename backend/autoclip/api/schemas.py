@@ -113,6 +113,12 @@ class JobOut(BaseModel):
     started_at: str | None = None
     finished_at: str | None = None
     source: SourceOut | None = None
+    #: Groq spend for this job; ``est_cost_usd`` is an estimate (the Groq console is authoritative).
+    llm_calls: int = 0
+    llm_input_tokens: int = 0
+    llm_output_tokens: int = 0
+    transcribe_seconds: float = 0.0
+    est_cost_usd: float = 0.0
 
     @classmethod
     def of(cls, job: models.Job, source: models.Source | None = None) -> JobOut:
@@ -124,6 +130,11 @@ class JobOut(BaseModel):
             progress=job.progress,
             error=job.error,
             provider=job.provider,
+            llm_calls=job.llm_calls,
+            llm_input_tokens=job.llm_input_tokens,
+            llm_output_tokens=job.llm_output_tokens,
+            transcribe_seconds=job.transcribe_seconds,
+            est_cost_usd=round(job.est_cost_usd, 5),
             created_at=job.created_at,
             updated_at=job.updated_at,
             started_at=job.started_at,

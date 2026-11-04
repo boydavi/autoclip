@@ -85,6 +85,12 @@ class Job:
     updated_at: str = field(default_factory=utcnow)
     started_at: str | None = None
     finished_at: str | None = None
+    #: What the job spent on Groq (see ``autoclip.usage``); cost is an estimate.
+    llm_calls: int = 0
+    llm_input_tokens: int = 0
+    llm_output_tokens: int = 0
+    transcribe_seconds: float = 0.0
+    est_cost_usd: float = 0.0
 
     @classmethod
     def from_row(cls, row: sqlite3.Row) -> Job:
@@ -101,6 +107,11 @@ class Job:
             updated_at=row["updated_at"],
             started_at=row["started_at"],
             finished_at=row["finished_at"],
+            llm_calls=row["llm_calls"],
+            llm_input_tokens=row["llm_input_tokens"],
+            llm_output_tokens=row["llm_output_tokens"],
+            transcribe_seconds=row["transcribe_seconds"],
+            est_cost_usd=row["est_cost_usd"],
         )
 
 

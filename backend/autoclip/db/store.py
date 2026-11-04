@@ -245,6 +245,25 @@ def update_job(
         )
 
 
+def add_job_usage(
+    job_id: str,
+    *,
+    calls: int = 0,
+    input_tokens: int = 0,
+    output_tokens: int = 0,
+    transcribe_seconds: float = 0.0,
+    cost_usd: float = 0.0,
+) -> None:
+    """Add to a job's Groq usage. Increments, so a retried stage accumulates instead of overwriting."""
+    with connection() as conn:
+        conn.execute(
+            "UPDATE jobs SET llm_calls = llm_calls + ?, llm_input_tokens = llm_input_tokens + ?, "
+            "llm_output_tokens = llm_output_tokens + ?, transcribe_seconds = transcribe_seconds + ?, "
+            "est_cost_usd = est_cost_usd + ?, updated_at = ? WHERE id = ?",
+            (calls, input_tokens, output_tokens, transcribe_seconds, cost_usd, utcnow(), job_id),
+        )
+
+
 def next_queued_job() -> Job | None:
     """Return the oldest queued job — the FIFO the worker pulls from."""
     with connection() as conn:

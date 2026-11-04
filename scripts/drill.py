@@ -208,6 +208,12 @@ def main() -> int:
           ", ".join(f"{k} {v[1] - v[0]:.1f}s" for k, v in spans.items()))
     retries = [w for w in warnings if "retrying" in w]
     print(f"Groq/LLM retries seen: {len(retries)}")
+    if final is not None:
+        print(
+            f"Groq usage: {final.llm_calls} LLM call(s), {final.llm_input_tokens:,} in / "
+            f"{final.llm_output_tokens:,} out tokens, {final.transcribe_seconds / 60:.1f} min Whisper audio, "
+            f"estimated ${final.est_cost_usd:.3f} (pre-run guess ${est:.3f}). The Groq console is exact."
+        )
     for w in warnings[:15]:
         print("  warn:", w[:200])
     for c in clips:

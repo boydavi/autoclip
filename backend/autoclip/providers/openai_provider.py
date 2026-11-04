@@ -96,6 +96,9 @@ class OpenAIProvider(LLMProvider):
             else:
                 raise _translate(exc, self.name, self.model) from exc
 
+        used = getattr(response, "usage", None)
+        if used is not None:
+            self.usage.add(getattr(used, "prompt_tokens", 0), getattr(used, "completion_tokens", 0))
         choices = response.choices or []
         if not choices:
             raise ProviderError("The endpoint returned no choices.", provider=self.name)

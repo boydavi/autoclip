@@ -145,6 +145,19 @@ def _migration_v5(conn: sqlite3.Connection) -> None:
     conn.executescript(_V5)
 
 
+_V6 = """
+ALTER TABLE jobs ADD COLUMN llm_calls           INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN llm_input_tokens    INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN llm_output_tokens   INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN transcribe_seconds  REAL    NOT NULL DEFAULT 0;
+ALTER TABLE jobs ADD COLUMN est_cost_usd        REAL    NOT NULL DEFAULT 0;
+"""
+
+
+def _migration_v6(conn: sqlite3.Connection) -> None:
+    conn.executescript(_V6)
+
+
 #: Ordered migrations. Index + 1 is the resulting ``user_version``.
 #: Append only — never edit a migration that has shipped.
 MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
@@ -153,6 +166,7 @@ MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migration_v3,
     _migration_v4,
     _migration_v5,
+    _migration_v6,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)
