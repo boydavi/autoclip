@@ -25,6 +25,7 @@ from ..db import store
 from ..db.models import Clip, Export, Job, Source, new_id, utcnow
 from ..db.models import Transcript as TranscriptRow
 from ..providers import build_provider, detection_config
+from ..postcaption import episode_line
 from ..usage import llm_cost_usd, whisper_cost_usd
 from . import Stage, captions, export, ffmpeg, highlights, prepare, transcribe
 from .prepare import Silence
@@ -582,7 +583,8 @@ class PipelineRunner:
                 cancelled=self._is_cancelled,
             )
 
-            post_text = clip.post_text(self.settings.post.cta, self.settings.post.link)
+            episode = episode_line(self.source.url, clip.start_s) if self.settings.post.episode_link else ""
+            post_text = clip.post_text(self.settings.post.cta, self.settings.post.link, episode)
             if post_text:
                 destination.with_suffix(".txt").write_text(post_text + "\n", encoding="utf-8")
 

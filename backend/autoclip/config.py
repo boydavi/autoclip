@@ -125,6 +125,8 @@ class PostSettings(BaseModel):
     cta: str = ""
     #: e.g. a funnel or sign-up link. Empty = none.
     link: str = ""
+    #: Add a "Full episode:" line linking to the source video at the moment the clip starts.
+    episode_link: bool = False
 
 
 class Settings(BaseModel):

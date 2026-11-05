@@ -96,6 +96,7 @@ class JobSettingsIn(BaseModel):
     #: Call-to-action line and link added to each clip's post text.
     cta: str | None = None
     link: str | None = None
+    episode_link: bool | None = None
 
 
 class JobCreateIn(BaseModel):

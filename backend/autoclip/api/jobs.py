@@ -59,6 +59,8 @@ def _apply_overrides(settings, overrides: JobSettingsIn):
         merged.post.cta = overrides.cta.strip()
     if overrides.link is not None:
         merged.post.link = overrides.link.strip()
+    if overrides.episode_link is not None:
+        merged.post.episode_link = overrides.episode_link
 
     return merged
 

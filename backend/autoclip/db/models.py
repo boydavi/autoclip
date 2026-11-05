@@ -178,12 +178,12 @@ class Clip:
     def post_title_list(self) -> list[str]:
         return [line for line in self.post_titles.split("\n") if line.strip()]
 
-    def post_text(self, cta: str = "", link: str = "") -> str:
-        """The full post file: title options, description, CTA + link, hashtags."""
+    def post_text(self, cta: str = "", link: str = "", episode: str = "") -> str:
+        """The full post file: title options, description, CTA + link + episode line, hashtags."""
         from ..postcaption import compose_post_text
 
         return compose_post_text(
-            titles=self.post_title_list, description=self.description, cta=cta, link=link, hashtags=self.hashtags
+            titles=self.post_title_list, description=self.description, cta=cta, link=link, episode=episode, hashtags=self.hashtags
         )
 
     @property
