@@ -158,6 +158,15 @@ def _migration_v6(conn: sqlite3.Connection) -> None:
     conn.executescript(_V6)
 
 
+_V7 = """
+ALTER TABLE clips ADD COLUMN post_titles TEXT NOT NULL DEFAULT '';
+"""
+
+
+def _migration_v7(conn: sqlite3.Connection) -> None:
+    conn.executescript(_V7)
+
+
 #: Ordered migrations. Index + 1 is the resulting ``user_version``.
 #: Append only — never edit a migration that has shipped.
 MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
@@ -167,6 +176,7 @@ MIGRATIONS: list[Callable[[sqlite3.Connection], None]] = [
     _migration_v4,
     _migration_v5,
     _migration_v6,
+    _migration_v7,
 ]
 
 SCHEMA_VERSION = len(MIGRATIONS)

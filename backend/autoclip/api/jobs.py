@@ -55,6 +55,10 @@ def _apply_overrides(settings, overrides: JobSettingsIn):
     if overrides.music_track is not None:
         merged.export.music_enabled = True
         merged.export.music_track = overrides.music_track
+    if overrides.cta is not None:
+        merged.post.cta = overrides.cta.strip()
+    if overrides.link is not None:
+        merged.post.link = overrides.link.strip()
 
     return merged
 

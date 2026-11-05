@@ -220,6 +220,8 @@ def main() -> int:
         print(f"  clip {c.start_s:7.1f}-{c.end_s:7.1f}  [{c.mood or '-':9}] {c.title[:60]}")
         if c.description or c.hashtags:
             print(f"      {c.description[:110]}  {c.hashtags}")
+        for n, title in enumerate(c.post_title_list, 1):
+            print(f"      title option {n}: {title}")
     return 0 if all(ok for _, ok, _ in checks) else 1
 
 

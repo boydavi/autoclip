@@ -93,6 +93,9 @@ class JobSettingsIn(BaseModel):
         "keynote", "product-demo", "debate", "storytime",
     ] | None = None
     music_track: str | None = None
+    #: Call-to-action line and link added to each clip's post text.
+    cta: str | None = None
+    link: str | None = None
 
 
 class JobCreateIn(BaseModel):
@@ -196,6 +199,7 @@ class ClipOut(BaseModel):
     ratio: str = "9:16"
     description: str = ""
     hashtags: str = ""
+    post_titles: list[str] = Field(default_factory=list)
     mood: str = ""
     exports: list[ExportOut] = Field(default_factory=list)
 
@@ -228,6 +232,7 @@ class ClipOut(BaseModel):
             ratio=edit.ratio if edit else default_ratio,
             description=clip.description,
             hashtags=clip.hashtags,
+            post_titles=clip.post_title_list,
             mood=clip.mood,
             exports=[ExportOut.of(e) for e in (exports or [])],
         )

@@ -343,8 +343,8 @@ def replace_clips(job_id: str, clips: list[Clip]) -> list[Clip]:
             """
             INSERT INTO clips (id, job_id, rank, start_s, end_s, start_word, end_word,
                                title, hook, score, reason, status, user_trimmed, created_at,
-                               description, hashtags, mood)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                               description, hashtags, mood, post_titles)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             [
                 (
@@ -365,6 +365,7 @@ def replace_clips(job_id: str, clips: list[Clip]) -> list[Clip]:
                     c.description,
                     c.hashtags,
                     c.mood,
+                    c.post_titles,
                 )
                 for c in clips
             ],

@@ -582,10 +582,9 @@ class PipelineRunner:
                 cancelled=self._is_cancelled,
             )
 
-            if clip.post_caption:
-                destination.with_suffix(".txt").write_text(
-                    clip.post_caption + "\n", encoding="utf-8"
-                )
+            post_text = clip.post_text(self.settings.post.cta, self.settings.post.link)
+            if post_text:
+                destination.with_suffix(".txt").write_text(post_text + "\n", encoding="utf-8")
 
             store.create_export(
                 Export(

@@ -325,6 +325,7 @@ def build_clips(
                 reason=candidate.reason.strip(),
                 description=candidate.description.strip(),
                 hashtags=" ".join(candidate.hashtags),
+                post_titles="\n".join(candidate.post_titles),
                 mood=candidate.mood,
             )
         )

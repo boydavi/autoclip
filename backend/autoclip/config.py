@@ -118,6 +118,15 @@ class ExportSettings(BaseModel):
     music_track: str | None = Field(default=None, exclude=True)
 
 
+class PostSettings(BaseModel):
+    """Lines added to every clip's post text (the ``.txt`` beside the exported clip)."""
+
+    #: e.g. "Follow for more business tactics." Empty = none.
+    cta: str = ""
+    #: e.g. a funnel or sign-up link. Empty = none.
+    link: str = ""
+
+
 class Settings(BaseModel):
     """Top-level persisted settings."""
 
@@ -137,6 +146,7 @@ class Settings(BaseModel):
     clips: ClipSettings = Field(default_factory=ClipSettings)
     ingest: IngestSettings = Field(default_factory=IngestSettings)
     export: ExportSettings = Field(default_factory=ExportSettings)
+    post: PostSettings = Field(default_factory=PostSettings)
 
     #: Set when secrets had to be written to config.json because no keyring
     #: backend was usable. Surfaced as a warning in the UI and in `doctor`.

@@ -164,6 +164,8 @@ class Clip:
     description: str = ""
     #: Space separated ``#tags``; kept flat so SQLite needs no JSON column.
     hashtags: str = ""
+    #: The three post-title options, one per line (flat, like ``hashtags``).
+    post_titles: str = ""
     #: "energetic" | "calm" | "dramatic", or "" when the model gave none.
     mood: str = ""
 
@@ -171,6 +173,18 @@ class Clip:
     def post_caption(self) -> str:
         """Description plus hashtags, ready to paste into a platform's caption box."""
         return "\n\n".join(part for part in (self.description, self.hashtags) if part)
+
+    @property
+    def post_title_list(self) -> list[str]:
+        return [line for line in self.post_titles.split("\n") if line.strip()]
+
+    def post_text(self, cta: str = "", link: str = "") -> str:
+        """The full post file: title options, description, CTA + link, hashtags."""
+        from ..postcaption import compose_post_text
+
+        return compose_post_text(
+            titles=self.post_title_list, description=self.description, cta=cta, link=link, hashtags=self.hashtags
+        )
 
     @property
     def duration_s(self) -> float:
@@ -195,6 +209,7 @@ class Clip:
             created_at=row["created_at"],
             description=row["description"],
             hashtags=row["hashtags"],
+            post_titles=row["post_titles"],
             mood=row["mood"],
         )
 

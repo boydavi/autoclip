@@ -70,6 +70,8 @@ class ClipCandidate(BaseModel):
     #: Post text for the platform caption box, and its hashtags (``#tag`` each).
     description: str = ""
     hashtags: list[str] = Field(default_factory=list)
+    #: Up to three viewer-facing titles for the platform's title box (``title`` is a folder label).
+    post_titles: list[str] = Field(default_factory=list)
     #: Emotional register of what is said; picks the music mood downstream.
     mood: str = ""
 
@@ -85,6 +87,20 @@ class ClipCandidate(BaseModel):
     def _coerce_to_string(cls, value: Any) -> str:
         # Models occasionally return null or a number where text was asked for.
         return "" if value is None else str(value)
+
+    @field_validator("post_titles", mode="before")
+    @classmethod
+    def _coerce_post_titles(cls, value: Any) -> list[str]:
+        """Accept a list or a numbered/newline separated string; keep up to three clean, distinct titles."""
+        if value is None:
+            return []
+        items = value.splitlines() if isinstance(value, str) else list(value)
+        titles: list[str] = []
+        for item in items:
+            text = re.sub(r"^\s*(?:\d+[.)]|[-*])\s*", "", str(item)).strip().strip('"\u201c\u201d').strip()
+            if text and len(text) <= 100 and text.lower() not in {t.lower() for t in titles}:
+                titles.append(text)
+        return titles[:3]
 
     @field_validator("hashtags", mode="before")
     @classmethod
@@ -273,14 +289,24 @@ POST_CAPTION_PROMPT = """
 
 ## Post caption
 
-Every clip object also carries three extra fields. `description` and `hashtags` are
-written for the box a creator pastes into when posting:
+Every clip object also carries four extra fields. `post_titles`, `description` and
+`hashtags` are written for the boxes a creator pastes into when posting:
 
 `description` — one or two sentences, under 150 characters, in the speaker's
 language. Lead with the hook, no spoilers of the payoff, no emoji spam.
 
 `hashtags` — three to five, as a JSON array of strings like ["#startups", "#growth"].
 Specific to the clip's topic; no generic tags such as #fyp.
+
+`post_titles` — a JSON array of exactly three alternative titles for the platform's title
+box. Unlike `title` (a folder label), these are written to make a viewer stop scrolling.
+Each is under 70 characters, in the speaker's language, and takes a different angle: a
+short statement lifted from what is said, a direct challenge to the viewer ("Stop waiting
+for permission"), a pain or fear the viewer recognises, a contrast question ("Do you have
+a people problem or a systems problem?"), or a setup left unfinished ("Before you cut
+your price, read this:"). They must be true to the clip: use only what the speaker says,
+invent no numbers, names or claims, and promise nothing the clip does not deliver. No
+emoji, no hashtags.
 
 `mood` — the emotional register of what is SAID, which chooses the background music.
 Exactly one of "energetic", "calm", "dramatic". Judge the message, not the speaking
