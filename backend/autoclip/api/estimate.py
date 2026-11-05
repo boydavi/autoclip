@@ -22,17 +22,18 @@ router = APIRouter(prefix="/api/estimate", tags=["estimate"])
 
 ADVANCE_S = WINDOW_S - OVERLAP_S  # 420 s per step
 
-# Average English speech rate (words / second).
-_WORDS_PER_S = 130 / 60
+# Average speech rate (words / second): ~150 wpm, between a lecture and a fast conversation.
+_WORDS_PER_S = 150 / 60
 
-# Tokens per rendered word: the "[N]word" format adds ~1 extra token per word.
-_TOKENS_PER_WORD = 2.3
+# Tokens per rendered word. Each word goes out as "[index]word", and the bracketed number costs
+# about three tokens on its own. Measured on a real Groq run (gpt-oss-120b): ~4.8 per word.
+_TOKENS_PER_WORD = 4.8
 
-# System prompt overhead per window call (tokens).
-_SYSTEM_TOKENS = 500
+# System prompt + the per-window wrapper (tokens): the prompt text is ~5,000 characters.
+_SYSTEM_TOKENS = 1400
 
-# Estimated output tokens per window (JSON with ≤10 clip proposals).
-_OUTPUT_TOKENS = 500
+# Output tokens per window, reasoning included (Groq counts it): ~730 measured.
+_OUTPUT_TOKENS = 750
 
 # Groq Whisper pricing per audio second.
 _GROQ_WHISPER_PER_S: dict[str, float] = {

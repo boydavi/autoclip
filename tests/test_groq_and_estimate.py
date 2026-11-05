@@ -212,13 +212,19 @@ class TestLlmPricing:
 
         assert haiku < sonnet < opus
 
-    def test_haiku_120_minute_source_costs_about_a_cent(self) -> None:
+    def test_haiku_120_minute_source_costs_about_two_cents(self) -> None:
         windows = estimate._window_count(7200)
 
         assert windows == 17
         assert 17 * estimate._llm_per_window("anthropic", "claude-haiku-5-5") == pytest.approx(
-            0.0092, abs=0.0005
+            0.0186, abs=0.0008
         )
+
+    def test_window_tokens_match_what_groq_really_billed(self) -> None:
+        # Measured: 6.0K input per window on a 10-minute talk, 8.9K on a fast 93-minute podcast.
+        tokens = estimate._SYSTEM_TOKENS + estimate._WORDS_PER_S * WINDOW_S * estimate._TOKENS_PER_WORD
+        assert 6000 <= tokens <= 9500
+        assert 600 <= estimate._OUTPUT_TOKENS <= 900     # measured ~730 incl. reasoning
 
     def test_legacy_opus_keeps_its_old_price(self) -> None:
         assert estimate._llm_per_window("anthropic", "claude-opus-4") == pytest.approx(
