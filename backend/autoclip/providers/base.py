@@ -212,6 +212,10 @@ class LLMProvider(ABC):
 
     # -- shared behaviour --------------------------------------------------
 
+    async def complete_json(self, system: str, user: str, config: DetectionConfig) -> dict[str, Any]:
+        """One prompt, one JSON object back (fences and chatter tolerated)."""
+        return extract_json_object(await self._complete(system, user, config))
+
     async def detect_highlights(
         self, window: TranscriptWindow, config: DetectionConfig
     ) -> ClipCandidates:
@@ -316,7 +320,11 @@ speed, and not how upbeat the speaker sounds. Decide in this order:
    to break. The listener should feel weight. Explaining how something works is never
    dramatic, even when the claim is surprising or alarming (a science, biology or
    psychology explanation is not a drama), and neither is a rhetorical question or a
-   mild example.
+   mild example. The SUBJECT is not the tone: a clip about trauma, fear, loss, money or lack
+   is not dramatic just because of its topic. Dramatic needs the moment itself to carry
+   weight: the speaker's own high stakes, a story at its turning point, or a hard truth
+   delivered with weight. A calm explanation of why a heavy topic works the way it does
+   is calm.
 2. "energetic" - the clip pushes the listener to act (a call to action, motivation, a
    challenge), celebrates a win or a success story, lands a joke, or ends on a quick punchy
    payoff. An upbeat explanation of an idea, a definition, or advice delivered in a warm
@@ -327,6 +335,10 @@ speed, and not how upbeat the speaker sounds. Decide in this order:
 Most clips are calm or energetic; dramatic is rare. Ask yourself: is the speaker moving
 the listener's emotions (dramatic or energetic), or informing and soothing them (calm)?
 """
+
+
+#: The mood rubric alone (everything from the ``mood`` field on), shared with the focused mood pass.
+MOOD_RULES = POST_CAPTION_PROMPT[POST_CAPTION_PROMPT.index("`mood`"):].strip()
 
 
 def render_window_prompt(window: TranscriptWindow, config: DetectionConfig) -> str:

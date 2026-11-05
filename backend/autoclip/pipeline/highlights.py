@@ -12,11 +12,13 @@ buys back the clips that live on the seams.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import logging
 from collections.abc import Callable
 
 from ..db.models import Clip, new_id
 from ..providers import ClipCandidate, DetectionConfig, LLMProvider, TranscriptWindow
+from ..providers.base import MOOD_RULES, MOODS
 from . import boundaries
 from .prepare import Silence
 from .transcript import Transcript
@@ -266,7 +268,63 @@ async def detect(
         return []
 
     log.info("Providers proposed %d raw candidates.", len(candidates))
-    return build_clips(transcript, candidates, config, job_id=job_id, silences=silences or [])
+    clips = build_clips(transcript, candidates, config, job_id=job_id, silences=silences or [])
+    await refine_moods(clips, transcript, provider, config, concurrency=concurrency or 4, is_cancelled=is_cancelled)
+    return clips
+
+
+_MOOD_SYSTEM = (
+    "You label the mood of ONE short video clip, which chooses its background music. You see only the "
+    "clip's transcript. Reply with ONLY a JSON object: {\"mood\": \"energetic\" | \"calm\" | \"dramatic\"}.\n\n"
+    + MOOD_RULES
+)
+#: A clip is ~25-90 seconds, so a few thousand characters; anything longer is cut, it is a label not a summary.
+_MOOD_TEXT_CHARS = 3000
+
+
+async def refine_moods(
+    clips: list[Clip],
+    transcript: Transcript,
+    provider: LLMProvider,
+    config: DetectionConfig,
+    *,
+    concurrency: int = 4,
+    is_cancelled: Callable[[], bool] | None = None,
+) -> int:
+    """Re-judge each clip's mood from its own text, in a focused call at temperature 0.
+
+    The window prompt asks the model for clip boundaries, titles, captions and a mood all at once,
+    and the mood came out unstable on borderline clips (the same clip was calm, energetic and dramatic
+    on three runs). Judging the clip alone, deterministically, is steadier and costs a fraction of a
+    cent. A failed or unusable reply keeps the window prompt's mood. Returns how many moods changed.
+    """
+    if not clips:
+        return 0
+    focused = dataclasses.replace(config, temperature=0.0)
+    gate = asyncio.Semaphore(max(1, concurrency))
+    changed = 0
+
+    async def one(clip: Clip) -> None:
+        nonlocal changed
+        if is_cancelled and is_cancelled():
+            return
+        text = transcript.text_between(clip.start_word, clip.end_word)[:_MOOD_TEXT_CHARS]
+        if not text:
+            return
+        async with gate:
+            try:
+                reply = await provider.complete_json(_MOOD_SYSTEM, f"Clip transcript:\n{text}", focused)
+            except Exception as exc:  # noqa: BLE001 - the window prompt's mood stays
+                log.debug("Mood pass failed for clip %s: %s", clip.id, exc)
+                return
+        mood = str(reply.get("mood", "")).strip().lower()
+        if mood in MOODS and mood != clip.mood:
+            clip.mood = mood
+            changed += 1
+
+    await asyncio.gather(*(one(c) for c in clips))
+    log.info("Mood pass: %d of %d moods changed.", changed, len(clips))
+    return changed
 
 
 def build_clips(
