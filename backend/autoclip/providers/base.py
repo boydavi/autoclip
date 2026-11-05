@@ -284,17 +284,22 @@ Specific to the clip's topic; no generic tags such as #fyp.
 
 `mood` — the emotional register of what is SAID, which chooses the background music.
 Exactly one of "energetic", "calm", "dramatic". Judge the message, not the speaking
-speed. Most clips are NOT dramatic: use "dramatic" only for a genuine emotional or
-high-stakes moment, and spread the other clips across the three moods honestly.
-- "dramatic": a real turning point, a painful or hard truth, a confession, a
-  dangerous or life-changing event, tension about to break. The listener should feel
-  weight. Explaining an idea, even an important one, is not dramatic.
-- "energetic": motivation, a call to action, humour, excitement, urgency, a quick
-  punchy payoff.
-- "calm": the default for explanation, teaching, science or how-things-work content,
-  reflection, gentle advice, reassurance, or a soft intimate message.
-Ask yourself: is the speaker moving the listener's emotions (dramatic or energetic),
-or informing and soothing them (calm)?
+speed, and not how upbeat the speaker sounds. Decide in this order:
+1. "dramatic" - only a genuine emotional or high-stakes moment: a real turning point, a
+   painful or hard truth, a confession, a dangerous or life-changing event, tension about
+   to break. The listener should feel weight. Explaining how something works is never
+   dramatic, even when the claim is surprising or alarming (a science, biology or
+   psychology explanation is not a drama), and neither is a rhetorical question or a
+   mild example.
+2. "energetic" - the clip pushes the listener to act (a call to action, motivation, a
+   challenge), celebrates a win or a success story, lands a joke, or ends on a quick punchy
+   payoff. An upbeat explanation of an idea, a definition, or advice delivered in a warm
+   tone is NOT energetic.
+3. "calm" - everything else: explanation, teaching, science or how-things-work content,
+   reflection, storytelling without a punch, gentle advice, reassurance, a soft intimate
+   message. When in doubt between calm and another mood, choose calm.
+Most clips are calm or energetic; dramatic is rare. Ask yourself: is the speaker moving
+the listener's emotions (dramatic or energetic), or informing and soothing them (calm)?
 """
 
 

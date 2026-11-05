@@ -85,3 +85,12 @@ def test_migration_adds_the_mood_column():
     for migration in schema.MIGRATIONS:
         migration(conn)
     assert "mood" in {r["name"] for r in conn.execute("PRAGMA table_info(clips)")}
+
+
+@pytest.mark.parametrize("version", ["highlight_v1", "highlight_comedy", "highlight_keynote"])
+def test_the_mood_rules_are_a_decision_order_that_defaults_to_calm(version):
+    text = load_prompt(version)
+    # measured on a 93-minute podcast: explanations were being labelled energetic or dramatic
+    assert "Decide in this order" in text
+    assert "NOT energetic" in text and "never\n   dramatic" in text
+    assert "When in doubt" in text and "choose calm" in text
