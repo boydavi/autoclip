@@ -16,6 +16,8 @@ from pathlib import Path
 
 import httpx
 
+sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # titles can hold characters cp1252 cannot print
+
 EXE = Path(sys.executable).with_name("autoclip.exe")
 URL = sys.argv[1]
 PORT = 8776

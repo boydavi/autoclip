@@ -86,6 +86,7 @@ def _render_checks(clips) -> list[tuple[str, bool, str]]:
 
 
 def main() -> int:
+    sys.stdout.reconfigure(encoding="utf-8", errors="replace")  # non-cp1252 titles
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument("media", type=Path)
     parser.add_argument("--max-minutes", type=float, default=15.0, help="spending guard")
