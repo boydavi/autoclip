@@ -93,4 +93,6 @@ def test_the_mood_rules_are_a_decision_order_that_defaults_to_calm(version):
     # measured on a 93-minute podcast: explanations were being labelled energetic or dramatic
     assert "Decide in this order" in text
     assert "NOT energetic" in text and "never\n   dramatic" in text
-    assert "When in doubt" in text and "choose calm" in text
+    # calm stays the "everything else" bucket; the tie-break asks whether the speaker rallies or informs
+    assert '"calm" - everything else' in text and "When torn between calm and energetic" in text
+    assert "rallies or empowers" in text and "dramatic is rare" in text

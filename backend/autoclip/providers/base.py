@@ -326,12 +326,15 @@ speed, and not how upbeat the speaker sounds. Decide in this order:
    delivered with weight. A calm explanation of why a heavy topic works the way it does
    is calm.
 2. "energetic" - the clip pushes the listener to act (a call to action, motivation, a
-   challenge), celebrates a win or a success story, lands a joke, or ends on a quick punchy
-   payoff. An upbeat explanation of an idea, a definition, or advice delivered in a warm
-   tone is NOT energetic.
+   challenge), rallies or empowers them (an emphatic declaration such as "you are the
+   creator of your life", an invitation to change), celebrates a win or a success story,
+   lands a joke, or ends on a quick punchy payoff. An upbeat explanation of an idea, a
+   definition, a surprising fact, a study result or a demonstration, or advice delivered
+   in a warm tone is NOT energetic.
 3. "calm" - everything else: explanation, teaching, science or how-things-work content,
    reflection, storytelling without a punch, gentle advice, reassurance, a soft intimate
-   message. When in doubt between calm and another mood, choose calm.
+   message. When torn between calm and energetic, ask whether the speaker is rallying or
+   empowering the listener (energetic) or informing and soothing them (calm).
 Most clips are calm or energetic; dramatic is rare. Ask yourself: is the speaker moving
 the listener's emotions (dramatic or energetic), or informing and soothing them (calm)?
 """
