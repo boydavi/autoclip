@@ -18,7 +18,7 @@ import contextlib
 import json
 import logging
 from collections.abc import AsyncIterator
-from dataclasses import asdict, dataclass, field
+from dataclasses import dataclass, field
 from typing import Any
 
 log = logging.getLogger(__name__)
@@ -161,16 +161,3 @@ def progress_event(job_id: str, event) -> Event:
         },
     )
 
-
-def as_dict(event: Event) -> dict[str, Any]:
-    return asdict(event)
-
-
-@contextlib.asynccontextmanager
-async def bound_loop():
-    """Bind the broker to the running loop for the lifetime of the app."""
-    broker.bind_loop(asyncio.get_running_loop())
-    try:
-        yield broker
-    finally:
-        broker.bind_loop(None)  # type: ignore[arg-type]

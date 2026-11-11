@@ -19,7 +19,6 @@ this heuristic is what runs on a laptop without another 400 MB of weights.
 from __future__ import annotations
 
 import logging
-import statistics
 from dataclasses import dataclass
 
 from .tracker import FaceTrack
@@ -216,8 +215,3 @@ def prominence(track: FaceTrack, frame_width: float, shot_duration_s: float) -> 
     size = track.mean_area**0.5
     persistence = min(1.0, track.duration_s / shot_duration_s)
     return size * (0.5 + 0.5 * track.centrality(frame_width)) * (0.4 + 0.6 * persistence)
-
-
-def mean_mar(track: FaceTrack, start_s: float, end_s: float) -> float:
-    values = [o.mar for o in track.observations_between(start_s, end_s)]
-    return statistics.fmean(values) if values else 0.0

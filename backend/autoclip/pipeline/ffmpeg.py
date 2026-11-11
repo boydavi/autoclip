@@ -46,14 +46,6 @@ class FFmpegError(RuntimeError):
 
 
 @dataclass
-class StreamInfo:
-    codec: str
-    #: Audio only.
-    sample_rate: int | None = None
-    channels: int | None = None
-
-
-@dataclass
 class MediaInfo:
     path: Path
     duration_s: float

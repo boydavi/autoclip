@@ -12,7 +12,6 @@ to fix it, rather than surfacing a raw yt-dlp traceback.
 from __future__ import annotations
 
 import logging
-import re
 import shutil
 from collections.abc import Callable
 from pathlib import Path
@@ -163,13 +162,6 @@ def _sanitize_headers(headers: dict[str, str] | None) -> dict[str, str]:
         k: v for k, v in headers.items()
         if k.lower() not in _BLOCKED_REQUEST_HEADERS
     }
-
-
-def slugify(text: str, *, max_length: int = 60) -> str:
-    """Turn a title into a filesystem- and URL-safe slug."""
-    slug = re.sub(r"[^\w\s-]", "", text, flags=re.UNICODE).strip().lower()
-    slug = re.sub(r"[\s_-]+", "-", slug).strip("-")
-    return slug[:max_length] or "clip"
 
 
 # --------------------------------------------------------------------------
@@ -467,7 +459,7 @@ def ingest_url(
             raise
         except Exception as exc:
             shutil.rmtree(target_dir, ignore_errors=True)
-            raise IngestError(f"Could not download the URL.") from exc
+            raise IngestError("Could not download the URL.") from exc
 
     if not use_http_fallback:
         # Both yt-dlp paths returned without raising — should not happen.
