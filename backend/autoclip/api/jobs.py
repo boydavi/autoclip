@@ -28,6 +28,8 @@ def _apply_overrides(settings, overrides: JobSettingsIn):
 
     if overrides.provider:
         merged.active_provider = overrides.provider
+    if overrides.whisper_provider:
+        merged.whisper.provider = overrides.whisper_provider
     if overrides.whisper_model:
         merged.whisper.model = overrides.whisper_model
     if overrides.language is not None:

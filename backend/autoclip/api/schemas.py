@@ -76,7 +76,10 @@ class UrlIngestIn(BaseModel):
 class JobSettingsIn(BaseModel):
     """Per-job overrides. Anything omitted falls back to saved settings."""
 
+    #: The LLM that picks the clips ("anthropic", "openai", "gemini", "groq", "ollama"); an unknown name is a 400.
     provider: str | None = None
+    #: Where the speech is transcribed: Groq's hosted Whisper or the local model.
+    whisper_provider: Literal["local", "groq"] | None = None
     whisper_model: str | None = None
     language: str | None = None
     diarization: bool | None = None
