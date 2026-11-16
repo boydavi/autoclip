@@ -37,6 +37,7 @@ dependencies = [
   "keyring>=25.4",
   # Ingest
   "yt-dlp>=2026.1.1",
+  "yt-dlp-ejs>=0.8.0",
   # Transcription
   "faster-whisper>=1.1",
   # Reframe

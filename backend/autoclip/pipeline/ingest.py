@@ -189,6 +189,7 @@ def fetch_youtube_captions(url: str, target_dir: Path, settings: IngestSettings 
         "no_warnings": True,
         "noprogress": True,
     }
+    options.update(_js_runtime_options())
     if settings.cookies_from_browser:
         options["cookiesfrombrowser"] = (settings.cookies_from_browser,)
     try:
@@ -245,6 +246,7 @@ def ingest_youtube(
         "retries": 3,
         "fragment_retries": 3,
     }
+    options.update(_js_runtime_options())
     if settings.cookies_from_browser:
         # yt-dlp expects a tuple; only the browser name is required.
         options["cookiesfrombrowser"] = (settings.cookies_from_browser,)
@@ -285,6 +287,15 @@ def ingest_youtube(
         has_audio=info.has_audio,
         has_video=info.has_video,
     )
+
+
+def _js_runtime_options() -> dict:
+    """yt-dlp needs a JavaScript runtime (and its challenge solver, ``yt-dlp-ejs``) to read YouTube's formats.
+    It switches deno on by itself; use Node when that is what this machine has. Without either, some formats
+    silently go missing."""
+    if shutil.which("deno") or not shutil.which("node"):
+        return {}
+    return {"js_runtimes": {"node": {}}}
 
 
 def _translate_ytdlp_error(exc: Exception, settings: IngestSettings) -> IngestError:
@@ -417,6 +428,7 @@ def ingest_url(
             "retries": 3,
             "fragment_retries": 3,
         }
+        options.update(_js_runtime_options())
         if settings.cookies_from_browser:
             options["cookiesfrombrowser"] = (settings.cookies_from_browser,)
 
