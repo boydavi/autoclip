@@ -487,6 +487,7 @@ def _loudnorm_analysis(
     settings: ExportSettings,
     *,
     music_track: Path | None = None,
+    music_gain_db: float | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> dict[str, str]:
     """Run an audio-only analysis pass and return loudnorm measured stats.
@@ -507,14 +508,9 @@ def _loudnorm_analysis(
     )
 
     if music_track is not None:
-        vol = settings.music_volume
         # [anlout] label is required: -filter_complex never auto-maps unlabeled outputs,
         # so without it ffmpeg exits with "no stream" and the JSON block never appears.
-        audio_fg = (
-            f"[1:a]volume={vol:.4f}[bgm];"
-            f"[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=3[mixed];"
-            f"[mixed]{ln}[anlout]"
-        )
+        audio_fg = _music_mix_graph(settings, music_gain_db) + f"[mixed]{ln}[anlout]"
         args = [
             "-ss", f"{start_s:.4f}",
             "-t", f"{duration_s:.4f}",
@@ -567,25 +563,104 @@ def _loudnorm_analysis(
     return {}
 
 
-def build_audio_filtergraph(settings: ExportSettings, measured: dict[str, str] | None = None) -> str:
-    return _loudnorm_filter(settings, measured)
+#: Peak ceiling after loudnorm. Its own true-peak limiter can overshoot, and ffmpeg's alimiter
+#: auto-levels back up to 0 dB unless ``level=disabled`` (found measuring ATALLA's renderer).
+_CEILING = f",alimiter=limit={10 ** (LOUDNESS_TRUE_PEAK / 20):.3f}:level=disabled"
+
+#: Music ducks under speech: the gentle sidechain settings ATALLA's own renderer uses.
+DUCK_FILTER = "sidechaincompress=threshold=0.05:ratio=2:attack=20:release=400:makeup=1"
+
+#: A measured music gain outside this range is not to be trusted (a near-silent track would
+#: otherwise be amplified into noise).
+MUSIC_GAIN_LIMITS_DB = (-40.0, 45.0)
+
+
+def _integrated_lufs(input_args: list[str]) -> float | None:
+    """Integrated loudness (LUFS) of an audio input given as ffmpeg input arguments.
+
+    None when it cannot be measured (silence, a failure, a timeout).
+    """
+    try:
+        run = subprocess.run(
+            [ffmpeg.ffmpeg_path(), "-hide_banner", "-nostdin", *input_args, "-vn", "-af", "ebur128",
+             "-f", "null", os.devnull],
+            capture_output=True, text=True, timeout=180,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    found = re.findall(r"I:\s+(-?\d+(?:\.\d+)?|-inf) LUFS", run.stderr)
+    if not found or found[-1] == "-inf":
+        return None
+    value = float(found[-1])
+    # ffmpeg's absolute gate: digital silence reports -70 LUFS. That is "nothing measured",
+    # not a loudness.
+    return None if value <= -69.0 else value
+
+
+def _music_gain_db(
+    settings: ExportSettings, source: Path, start_s: float, duration_s: float, music_track: Path
+) -> float | None:
+    """The gain that puts the music ``music_volume`` (0.12 = -18 dB) below the speech.
+
+    Library tracks are mastered at wildly different levels (the bundled ones sit near -44 LUFS
+    against speech at -14), so a fixed multiplier made the music inaudible. Measuring both puts
+    it where it was meant to be. None when either cannot be measured: the caller then keeps the
+    fixed multiplier.
+    """
+    speech = _integrated_lufs(
+        ["-ss", f"{start_s:.4f}", "-t", f"{duration_s:.4f}", "-i", str(source)])
+    music = _integrated_lufs(
+        ["-stream_loop", "-1", "-t", f"{duration_s:.4f}", "-i", str(music_track)])
+    if speech is None or music is None:
+        return None
+    gain = speech - music + 20.0 * math.log10(max(settings.music_volume, 1e-4))
+    low, high = MUSIC_GAIN_LIMITS_DB
+    return max(low, min(high, gain))
+
+
+def build_audio_filtergraph(
+    settings: ExportSettings, measured: dict[str, str] | None = None
+) -> str:
+    return _loudnorm_filter(settings, measured) + _CEILING
+
+
+def _ducked_music_graph(settings: ExportSettings, music_gain_db: float | None = None) -> str:
+    """Input 1 (music) at the right level, keyed by input 0 (speech) so it dips while someone talks.
+
+    It comes back in the pauses. Leaves the speech as ``[voice]`` and the music as ``[ducked]``.
+    ``music_gain_db`` is the measured gain from ``_music_gain_db``; without it the raw
+    ``music_volume`` multiplier is used, which only suits a track mastered at the speech's level.
+    """
+    gain = f"{music_gain_db:.2f}dB" if music_gain_db is not None else f"{settings.music_volume:.4f}"
+    return (
+        "[0:a]asplit=2[voice][sc];"
+        f"[1:a]volume={gain}[bgm];"
+        f"[bgm][sc]{DUCK_FILTER}[ducked];"
+    )
+
+
+def _music_mix_graph(settings: ExportSettings, music_gain_db: float | None = None) -> str:
+    """Speech plus ducked music, ending at ``[mixed]``.
+
+    The loudness analysis and the final encode both build from this one string, so the level
+    they measure is the level that ships.
+    """
+    mix = "[voice][ducked]amix=inputs=2:duration=first:dropout_transition=3[mixed];"
+    return _ducked_music_graph(settings, music_gain_db) + mix
 
 
 def build_music_audio_filtergraph(
-    settings: ExportSettings, measured: dict[str, str] | None = None
+    settings: ExportSettings,
+    measured: dict[str, str] | None = None,
+    music_gain_db: float | None = None,
 ) -> str:
     """Return the filter_complex audio chain that mixes input 1 (music) under input 0 (speech).
 
     Pass measured loudnorm stats for two-pass normalisation (linear=true), which
     avoids the pumping that single-pass dynamic loudnorm can introduce on mixed audio.
     """
-    vol = settings.music_volume
     ln = _loudnorm_filter(settings, measured)
-    return (
-        f"[1:a]volume={vol:.4f}[bgm];"
-        f"[0:a][bgm]amix=inputs=2:duration=first:dropout_transition=3[mixed];"
-        f"[mixed]{ln}[aout]"
-    )
+    return _music_mix_graph(settings, music_gain_db) + f"[mixed]{ln}{_CEILING}[aout]"
 
 
 #: libx264 presets that Quick Sync lacks map to its fastest one.
@@ -713,12 +788,21 @@ def export_clip(
 
     # Loudnorm two-pass: analyse the audio mix first so the encode pass can use
     # linear=true normalisation (single gain correction, no dynamic pumping).
+    music_gain_db = None
+    if request.music_track is not None:
+        music_gain_db = _music_gain_db(
+            settings, request.source, request.start_s, request.duration_s, request.music_track)
+        if music_gain_db is None:
+            log.warning("could not measure the music and speech levels; using the fixed gain.")
+        else:
+            log.info("music gain %.1f dB (music_volume %.2f)", music_gain_db, settings.music_volume)
     measured = _loudnorm_analysis(
         request.source,
         request.start_s,
         request.duration_s,
         settings,
         music_track=request.music_track,
+        music_gain_db=music_gain_db,
         cancelled=cancelled,
     )
 
@@ -727,7 +811,8 @@ def export_clip(
     if request.music_track is not None:
         # Music is input 1 (-stream_loop -1 loops it for clips shorter than the
         # track; ffmpeg stops at the speech duration via amix duration=first).
-        combined_filtergraph = filtergraph + ";" + build_music_audio_filtergraph(settings, measured)
+        music_graph = build_music_audio_filtergraph(settings, measured, music_gain_db)
+        combined_filtergraph = filtergraph + ";" + music_graph
         args = [
             "-ss",
             f"{request.start_s:.4f}",
