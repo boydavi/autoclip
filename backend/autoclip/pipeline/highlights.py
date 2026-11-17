@@ -392,9 +392,7 @@ def build_clips(
     clips = _dedupe_clips(clips)
     clips.sort(key=lambda c: c.score, reverse=True)
     clips = _spread_clips(clips, max_clips=config.max_clips)
-
-    for rank, clip in enumerate(clips, start=1):
-        clip.rank = rank
+    _assign_ranks(clips)
 
     log.info("Produced %d final clips.", len(clips))
     return clips
@@ -457,9 +455,19 @@ def _spread_clips(
             break
         kept.append(clip)
 
-    # Restore chronological order for the rank assignment that follows.
+    # Timeline order here; the caller ranks the survivors by score (see _assign_ranks).
     kept.sort(key=lambda c: c.start_s)
     return kept
+
+
+def _assign_ranks(clips: list) -> None:
+    """Order ``clips`` best first (score, then earlier start) and number them 1..n.
+
+    Rank 1 is the best clip, not merely the earliest one. In place.
+    """
+    clips.sort(key=lambda c: (-c.score, c.start_s))
+    for rank, clip in enumerate(clips, start=1):
+        clip.rank = rank
 
 
 def _dedupe_clips(clips: list[Clip], *, iou_threshold: float = DEDUPE_IOU) -> list[Clip]:

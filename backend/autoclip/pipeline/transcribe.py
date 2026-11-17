@@ -55,14 +55,34 @@ def resolve_compute(settings: WhisperSettings, gpu: GPUInfo | None = None) -> tu
     return device, override
 
 
+def _word_spans(raw: list[str], start_ms: float, end_ms: float) -> list[tuple[float, float]]:
+    """(start_s, end_s) for each word of a caption stretch.
+
+    The time is shared by word LENGTH (plus a fixed share per word, so "a" is not squeezed
+    to nothing) instead of evenly: long words take longer to say, so animated captions stay
+    closer to the speech when YouTube gives no per-word timing. Contiguous; the last word
+    ends at ``end_ms``.
+    """
+    weights = [len(w.strip(".,!?;:\"'()[]-")) + 2 for w in raw]
+    total = sum(weights) or 1
+    span = max(0.0, end_ms - start_ms)
+    spans, t = [], float(start_ms)
+    for weight in weights:
+        nxt = t + span * weight / total
+        spans.append((t / 1000.0, nxt / 1000.0))
+        t = nxt
+    return spans
+
+
 def parse_youtube_captions(json3_path: Path) -> Transcript | None:
     """Parse a YouTube json3 automatic-caption file into a Transcript.
 
     Word timestamps use per-segment ``tOffsetMs`` values when present in the
     json3 ``segs`` array — YouTube auto-captions include these for karaoke-style
     highlighting, giving us phrase-level timing within each caption event.  When
-    no offsets are present the event duration is distributed linearly across its
-    words as a fallback.  Returns ``None`` if the file is missing or malformed.
+    no offsets are present the event duration is shared across its words by word
+    length (``_word_spans``) as a fallback.  Returns ``None`` if the file is missing
+    or malformed.
     """
     try:
         data = json.loads(json3_path.read_text(encoding="utf-8"))
@@ -112,23 +132,14 @@ def parse_youtube_captions(json3_path: Path) -> Transcript | None:
                 raw = seg_text.split()
                 if not raw:
                     continue
-                seg_ms = seg_end_ms - seg_start_ms
-                w_ms = seg_ms / len(raw) if raw else 0.0
-                for j, w in enumerate(raw):
-                    words.append(Word(
-                        text=w,
-                        start=(seg_start_ms + j * w_ms) / 1000.0,
-                        end=(seg_start_ms + (j + 1) * w_ms) / 1000.0,
-                    ))
+                spans = _word_spans(raw, seg_start_ms, seg_end_ms)
+                for w, (w_start, w_end) in zip(raw, spans, strict=True):
+                    words.append(Word(text=w, start=w_start, end=w_end))
         else:
             raw_words = full_text.split()
-            w_ms = event_dur_ms / len(raw_words) if raw_words else 0.0
-            for i, w in enumerate(raw_words):
-                words.append(Word(
-                    text=w,
-                    start=(event_start_ms + i * w_ms) / 1000.0,
-                    end=(event_start_ms + (i + 1) * w_ms) / 1000.0,
-                ))
+            spans = _word_spans(raw_words, event_start_ms, event_end_ms)
+            for w, (w_start, w_end) in zip(raw_words, spans, strict=True):
+                words.append(Word(text=w, start=w_start, end=w_end))
 
         last_word = len(words) - 1
         if last_word < first_word:
