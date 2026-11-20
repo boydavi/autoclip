@@ -202,3 +202,54 @@ class TestSilenceAlignment:
 
         assert result is not None
         assert result.duration_s <= 12.0
+
+
+class TestSourceEnd:
+    """A clip near the end of the file must not ask ffmpeg for frames past it (audit GAP-03)."""
+
+    def _transcript(self):
+        return make_transcript([["a"] * 10, ["b"] * 10, ["c"] * 10], word_duration=1.0)
+
+    def test_tail_is_clamped_to_the_file_length(self) -> None:
+        t = self._transcript()                       # last word ends at 29.8 s
+        free = boundaries.refine(t, 20, 29, min_duration_s=5, max_duration_s=90)
+        assert free is not None and free.end_s > 29.8      # the tail is added when nothing stops it
+        clamped = boundaries.refine(t, 20, 29, min_duration_s=5, max_duration_s=90, source_duration_s=29.9)
+        assert clamped is not None and clamped.end_s <= 29.9
+
+    def test_unknown_length_changes_nothing(self) -> None:
+        t = self._transcript()
+        a = boundaries.refine(t, 0, 19, min_duration_s=5, max_duration_s=90)
+        b = boundaries.refine(t, 0, 19, min_duration_s=5, max_duration_s=90, source_duration_s=None)
+        assert a == b
+
+
+def test_purge_stale_audio_removes_only_old_files(tmp_path, monkeypatch) -> None:
+    import os
+    import time
+
+    from autoclip import paths
+    from autoclip.pipeline import runner
+
+    monkeypatch.setattr(paths, "work_dir", lambda: tmp_path)
+    for name, age_days in (("old", 10), ("new", 1), ("running", 30)):
+        d = tmp_path / name
+        d.mkdir()
+        (d / "audio.wav").write_bytes(b"x")
+        (d / "transcript.json").write_text("{}")
+        stamp = time.time() - age_days * 86400
+        os.utime(d / "audio.wav", (stamp, stamp))
+    assert runner.purge_stale_audio(keep_job_id="running") == 1
+    assert not (tmp_path / "old" / "audio.wav").exists()
+    assert (tmp_path / "new" / "audio.wav").exists()
+    assert (tmp_path / "running" / "audio.wav").exists()
+    assert (tmp_path / "old" / "transcript.json").exists()      # only the big audio goes
+
+
+def test_retry_delay_hint_reads_the_providers_wait() -> None:
+    from autoclip.pipeline.highlights import retry_delay_hint
+
+    assert retry_delay_hint(Exception("Rate limit reached. Please try again in 12.5s.")) == 12.5
+    assert retry_delay_hint(Exception("rate limit: try again in 1m30s")) == 90.0
+    assert retry_delay_hint(Exception("Retry-After: 30")) == 30.0
+    assert retry_delay_hint(Exception("rate limit exceeded")) is None

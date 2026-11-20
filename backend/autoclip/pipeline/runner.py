@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -101,6 +102,36 @@ class JobWorkspace:
     @property
     def captions_dir(self) -> Path:
         return self.root / "captions"
+
+
+#: A failed or cancelled job keeps its extracted audio so a retry can skip that step. Nothing retried after this long.
+STALE_AUDIO_DAYS = 7
+
+
+def purge_stale_audio(*, keep_job_id: str = "", max_age_days: float = STALE_AUDIO_DAYS) -> int:
+    """Delete ``audio.wav`` files left behind by jobs that failed or were cancelled and never retried.
+
+    Only the big extracted audio goes (hundreds of MB each); transcripts, silences and crops stay, so a late retry
+    re-extracts the audio and carries on. Returns the number of files removed.
+    """
+    removed = 0
+    cutoff = time.time() - max_age_days * 86400
+    root = paths.work_dir()
+    if not root.is_dir():
+        return 0
+    for job_dir in root.iterdir():
+        audio = job_dir / "audio.wav"
+        if job_dir.name == keep_job_id or not audio.is_file():
+            continue
+        try:
+            if audio.stat().st_mtime < cutoff:
+                audio.unlink()
+                removed += 1
+        except OSError as exc:
+            log.warning("Could not remove stale audio %s: %s", audio, exc)
+    if removed:
+        log.info("Removed %d stale audio file(s) from earlier failed or cancelled jobs.", removed)
+    return removed
 
 
 def transcript_matches_settings(row, whisper) -> bool:
@@ -239,6 +270,7 @@ class PipelineRunner:
 
         store.update_job(self.job.id, status="done", progress=1.0, finished_at=utcnow())
         self._cleanup_workspace()
+        purge_stale_audio(keep_job_id=self.job.id)
         return clips
 
     def _cleanup_workspace(self) -> None:
@@ -442,6 +474,7 @@ class PipelineRunner:
             on_progress=self._stage_progress(stage),
             concurrency=self.settings.provider(provider_name).concurrency,
             is_cancelled=self._is_cancelled,
+            source_duration_s=self.source.duration_s or None,
         )
         # what the clip-selection calls cost (kept even if the job is cancelled right after)
         used = provider.usage

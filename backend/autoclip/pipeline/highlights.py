@@ -45,6 +45,12 @@ LOCAL_CONCURRENCY = 1
 #: MAX_RETRIES times with exponential backoff (30 s, 60 s, 120 s …).
 MAX_RETRIES = 3
 RETRY_BASE_DELAY_S = 30.0
+#: Most time one job may spend waiting out rate limits, in total. The queue runs one job at a time, so without a cap a
+#: rate-limited key could hold every later job for 40+ minutes. Past the cap, rate-limited windows fail at once and the
+#: job stops with a clear message instead of waiting on.
+RATE_LIMIT_BUDGET_S = 300.0
+#: The longest single wait honoured when the provider says how long to wait.
+MAX_HINTED_DELAY_S = 120.0
 
 #: Substrings in an exception message that indicate a rate-limit response.
 _RATE_LIMIT_MARKERS = (
@@ -57,6 +63,16 @@ _RATE_LIMIT_MARKERS = (
 def _is_rate_limit(exc: Exception) -> bool:
     msg = str(exc).lower()
     return any(m in msg for m in _RATE_LIMIT_MARKERS)
+
+
+def retry_delay_hint(exc: Exception) -> float | None:
+    """Seconds the provider asked us to wait ("try again in 12.5s", "retry-after: 30"), or None."""
+    import re
+
+    m = re.search(r"(?:try again in|retry[- ]after:?)\s*(?:(\d+(?:\.\d+)?)\s*m(?!s))?\s*(\d+(?:\.\d+)?)?\s*s?", str(exc).lower())
+    if not m or not (m.group(1) or m.group(2)):
+        return None
+    return float(m.group(1) or 0) * 60 + float(m.group(2) or 0)
 
 
 class HighlightError(RuntimeError):
@@ -164,6 +180,7 @@ async def detect(
     on_progress: Callable[[float], None] | None = None,
     concurrency: int | None = None,
     is_cancelled: Callable[[], bool] | None = None,
+    source_duration_s: float | None = None,
 ) -> list[Clip]:
     """Run detection across the whole transcript and return ranked clips.
 
@@ -196,9 +213,10 @@ async def detect(
     completed = 0
     failed_windows = 0
     lock = asyncio.Lock()
+    waited = 0.0
 
     async def run_window(window: TranscriptWindow) -> list[ClipCandidate]:
-        nonlocal completed, failed_windows
+        nonlocal completed, failed_windows, waited
         async with semaphore:
             failed = False
             candidates: list[ClipCandidate] = []
@@ -213,8 +231,10 @@ async def detect(
                     last_exc = None
                     break
                 except Exception as exc:
-                    if _is_rate_limit(exc) and attempt < MAX_RETRIES - 1:
-                        delay = RETRY_BASE_DELAY_S * (2 ** attempt)
+                    if _is_rate_limit(exc) and attempt < MAX_RETRIES - 1 and waited < RATE_LIMIT_BUDGET_S:
+                        hint = retry_delay_hint(exc)
+                        delay = min(hint + 1.0, MAX_HINTED_DELAY_S) if hint is not None else RETRY_BASE_DELAY_S * (2 ** attempt)
+                        waited += delay
                         log.warning(
                             "Window %d-%d hit rate limit (attempt %d/%d); "
                             "retrying in %.0f s.",
@@ -268,7 +288,8 @@ async def detect(
         return []
 
     log.info("Providers proposed %d raw candidates.", len(candidates))
-    clips = build_clips(transcript, candidates, config, job_id=job_id, silences=silences or [])
+    clips = build_clips(transcript, candidates, config, job_id=job_id, silences=silences or [],
+                        source_duration_s=source_duration_s)
     await refine_moods(clips, transcript, provider, config, concurrency=concurrency or 4, is_cancelled=is_cancelled)
     return clips
 
@@ -334,6 +355,7 @@ def build_clips(
     *,
     job_id: str,
     silences: list[Silence] | None = None,
+    source_duration_s: float | None = None,
 ) -> list[Clip]:
     """Deduplicate, refine, rank, and truncate raw candidates into clips."""
     deduped = dedupe(candidates)
@@ -348,6 +370,7 @@ def build_clips(
             silences=silences or [],
             min_duration_s=config.min_duration_s,
             max_duration_s=config.max_duration_s,
+            source_duration_s=source_duration_s,
         )
         if boundary is None:
             log.debug(

@@ -65,6 +65,7 @@ def refine(
     silences: list[Silence] | None = None,
     min_duration_s: float = 20.0,
     max_duration_s: float = 90.0,
+    source_duration_s: float | None = None,
 ) -> Boundary | None:
     """Refine a proposed word range into a cuttable boundary.
 
@@ -99,6 +100,13 @@ def refine(
     # Alignment can only ever widen the clip, so re-check the ceiling.
     if end_s - start_s > max_duration_s:
         end_s = start_s + max_duration_s
+
+    # Silence alignment adds a tail after the last word; near the end of the file that tail would run past
+    # the media, so ffmpeg is asked for frames that do not exist.
+    if source_duration_s is not None and source_duration_s > 0:
+        end_s = min(end_s, source_duration_s)
+        if end_s <= start_s:
+            return None
 
     return Boundary(
         start_s=max(0.0, start_s), end_s=end_s, start_word=start_word, end_word=end_word
