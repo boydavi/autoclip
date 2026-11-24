@@ -20,6 +20,7 @@ import json
 import logging
 import shutil
 import subprocess
+import threading
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -298,13 +299,23 @@ def run(
         cwd=str(cwd) if cwd else None,
     )
 
+    # A pipe nobody reads fills (about 64 KB) and then ffmpeg blocks writing to it while we block reading the other one.
+    # stderr is always drained on its own thread; stdout too unless the progress loop below is the one reading it.
+    progress = bool(on_progress and total_duration_s and proc.stdout is not None)
+    err_thread, err_buf = _drain(proc.stderr)
+    out_thread, _ = (None, []) if progress else _drain(proc.stdout)
+
     try:
-        if on_progress and total_duration_s and proc.stdout is not None:
+        if progress:
             _pump_progress(proc, total_duration_s, on_progress, cancelled)
         elif cancelled is not None:
             _wait_cancellable(proc, cancelled)
 
-        stdout, stderr = proc.communicate()
+        proc.wait()
+        for th in (err_thread, out_thread):
+            if th is not None:
+                th.join(timeout=10)
+        stderr = "".join(err_buf)
     except BaseException:
         proc.kill()
         proc.wait()
@@ -319,6 +330,24 @@ def run(
 
     if on_progress:
         on_progress(1.0)
+
+
+def _drain(stream) -> tuple[threading.Thread | None, list[str]]:
+    """Read a pipe to the end on a background thread so ffmpeg never blocks on a full buffer. Returns (thread, lines)."""
+    buf: list[str] = []
+    if stream is None:
+        return None, buf
+
+    def pump() -> None:
+        try:
+            for line in stream:
+                buf.append(line)
+        except (OSError, ValueError):
+            pass
+
+    th = threading.Thread(target=pump, name="ffmpeg-drain", daemon=True)
+    th.start()
+    return th, buf
 
 
 class Cancelled(RuntimeError):

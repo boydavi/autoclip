@@ -9,11 +9,15 @@ from __future__ import annotations
 
 import logging
 import shutil
+import time
 from pathlib import Path
 
 from . import paths
 
 log = logging.getLogger(__name__)
+
+RMTREE_TRIES = 4
+RMTREE_PAUSE_S = 0.5
 
 
 def _is_inside(path: Path, root: Path) -> bool:
@@ -28,7 +32,13 @@ def _is_inside(path: Path, root: Path) -> bool:
 def _remove_tree(path: Path, root: Path) -> None:
     if path.resolve() == root.resolve() or not _is_inside(path, root) or not path.exists():
         return
-    shutil.rmtree(path, ignore_errors=True)
+    # Windows keeps a file locked for a moment after a thread or a virus scanner touched it: try again a few times.
+    for attempt in range(RMTREE_TRIES):
+        shutil.rmtree(path, ignore_errors=True)
+        if not path.exists():
+            return
+        if attempt + 1 < RMTREE_TRIES:
+            time.sleep(RMTREE_PAUSE_S * (attempt + 1))
     if path.exists():
         log.warning("Could not fully remove %s (file in use?); it can be deleted by hand.", path)
 

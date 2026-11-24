@@ -134,6 +134,41 @@ def purge_stale_audio(*, keep_job_id: str = "", max_age_days: float = STALE_AUDI
     return removed
 
 
+#: A downloaded source nobody has touched for this long, and with no queued or running job, is deleted (files only: the records stay,
+#: and ingesting the same address again downloads it afresh).
+STALE_MEDIA_DAYS = 14
+
+
+def purge_stale_media(*, keep_source_id: str = "", max_age_days: float = STALE_MEDIA_DAYS) -> int:
+    """Delete downloaded source videos that have sat unused for ``max_age_days``. Returns how many sources were cleared.
+
+    Without this the media folder only ever grew (a long 1080p source is 1.5-4 GB) until the disk check refused new work."""
+    from .. import cleanup  # noqa: PLC0415
+
+    root = paths.media_dir()
+    if not root.is_dir():
+        return 0
+    cutoff = time.time() - max_age_days * 86400
+    cleared = 0
+    for source in store.list_sources(limit=100000):
+        if source.id == keep_source_id or not source.path:
+            continue
+        folder = paths.source_media_dir(source.id)
+        try:
+            files = [p for p in folder.rglob("*") if p.is_file()] if folder.is_dir() else []
+            if not files or max(p.stat().st_mtime for p in files) >= cutoff:
+                continue
+            if any(j.status in ("queued", "running") for j in store.list_jobs_for_source(source.id)):
+                continue
+            cleanup.remove_source_files(source.id, source.path)
+            cleared += 1
+        except OSError as exc:
+            log.warning("Could not check source media %s: %s", folder, exc)
+    if cleared:
+        log.info("Removed the downloaded video of %d source(s) unused for %d days.", cleared, int(max_age_days))
+    return cleared
+
+
 def transcript_matches_settings(row, whisper) -> bool:
     """Whether a stored transcript can stand in for one made with *whisper*.
 
@@ -271,6 +306,10 @@ class PipelineRunner:
         store.update_job(self.job.id, status="done", progress=1.0, finished_at=utcnow())
         self._cleanup_workspace()
         purge_stale_audio(keep_job_id=self.job.id)
+        try:
+            purge_stale_media(keep_source_id=self.source.id)
+        except Exception:  # noqa: BLE001 - housekeeping never fails a finished job
+            log.exception("Could not purge stale source media.")
         return clips
 
     def _cleanup_workspace(self) -> None:

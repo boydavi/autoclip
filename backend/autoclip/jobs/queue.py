@@ -18,7 +18,7 @@ import logging
 from dataclasses import dataclass
 
 from ..db import store
-from ..db.models import Job
+from ..db.models import Job, utcnow
 from ..pipeline.runner import JobCancelled, PipelineRunner
 from .events import Event, broker, progress_event
 
@@ -146,6 +146,14 @@ class JobQueue:
             broker.publish(Event(type="cancelled", job_id=job.id))
             log.info("Job %s cancelled.", job.id)
         except Exception as exc:
+            # The runner records its own failures; this covers anything that went wrong before it could (thread start, the
+            # first database write), so a job is never left as "running" in the database.
+            try:
+                current = await asyncio.to_thread(store.get_job, job.id)
+                if current is None or current.status == "running":
+                    await asyncio.to_thread(store.update_job, job.id, status="failed", error=str(exc), finished_at=utcnow())
+            except Exception:  # noqa: BLE001 - the event below must still go out
+                log.exception("Could not record the failure of job %s.", job.id)
             broker.publish(Event(type="failed", job_id=job.id, data={"error": str(exc)}))
             log.exception("Job %s failed.", job.id)
         else:
