@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import logging
-import shutil
 import tempfile
 from pathlib import Path
 
@@ -275,14 +274,15 @@ async def upload_source(file: UploadFile = File(...)) -> SourceOut:
 
     # Stage to a temp file first so a failed or abandoned upload never leaves a
     # half-written file in the media store.
-    with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as staging:
-        staging_path = Path(staging.name)
-        try:
+    staging = tempfile.NamedTemporaryFile(delete=False, suffix=suffix)  # noqa: SIM115
+    staging_path = Path(staging.name)
+    try:
+        # Closed (on leaving this block) before any clean-up: Windows cannot delete an open file.
+        with staging:
             received = 0
             while chunk := await file.read(UPLOAD_CHUNK):
                 received += len(chunk)
                 if received > UPLOAD_MAX_BYTES:
-                    staging_path.unlink(missing_ok=True)
                     raise HTTPException(
                         status_code=413,
                         detail={
@@ -291,11 +291,15 @@ async def upload_source(file: UploadFile = File(...)) -> SourceOut:
                         },
                     )
                 staging.write(chunk)
-        except HTTPException:
-            raise
-        except Exception as exc:
-            staging_path.unlink(missing_ok=True)
-            raise HTTPException(status_code=500, detail="Upload failed.") from exc
+    except HTTPException:
+        staging_path.unlink(missing_ok=True)
+        raise
+    except Exception as exc:
+        staging_path.unlink(missing_ok=True)
+        raise HTTPException(status_code=500, detail="Upload failed.") from exc
+    except BaseException:  # the client went away mid-upload (the request task was cancelled)
+        staging_path.unlink(missing_ok=True)
+        raise
 
     try:
         source = await asyncio.to_thread(
@@ -306,8 +310,6 @@ async def upload_source(file: UploadFile = File(...)) -> SourceOut:
         raise HTTPException(
             status_code=422, detail={"message": str(exc), "hint": exc.hint}
         ) from exc
-    finally:
-        shutil.rmtree(staging_path.parent / staging_path.name, ignore_errors=True)
 
     await asyncio.to_thread(store.create_source, source)
     return SourceOut.of(source)

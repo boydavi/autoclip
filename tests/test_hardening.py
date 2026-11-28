@@ -105,3 +105,40 @@ def test_old_unused_sources_lose_their_video_but_recent_or_busy_ones_keep_it(ini
     assert runner.purge_stale_media(keep_source_id="kept") == 1
     assert not old_video.exists() and new_video.exists() and busy_video.exists() and kept_video.exists()
     assert store.get_source("old") is not None                   # the record stays; only the big file goes
+
+
+@pytest.fixture
+def api(initialised_db, monkeypatch):
+    from autoclip import app as app_module
+    from fastapi.testclient import TestClient
+
+    monkeypatch.setenv(app_module.ENV_NO_WORKER, "1")
+    monkeypatch.delenv(app_module.ENV_API_KEY, raising=False)
+    with TestClient(app_module.create_app(), base_url="http://localhost") as client:
+        yield client
+
+
+@pytest.mark.parametrize("values", [{"concurrency": "lots"}, {"model": None}, {"base_url": 7}])
+def test_a_bad_provider_value_is_refused_and_never_saved(api, values):
+    from autoclip import config
+
+    good = {"providers": {"groq": {"concurrency": 2}}}
+    assert api.put("/api/settings", json=good).status_code == 200
+    assert api.put("/api/settings", json={"providers": {"groq": values}}).status_code == 400
+    assert api.get("/api/settings").status_code == 200
+    assert config.load().provider("groq").concurrency == 2
+
+
+def test_an_over_limit_upload_is_a_413_and_leaves_no_temp_file(api, tmp_path, monkeypatch):
+    import tempfile
+
+    from autoclip.api import sources
+
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(staging))
+    monkeypatch.setattr(sources, "UPLOAD_MAX_BYTES", 10)
+    response = api.post("/api/sources/upload", files={"file": ("a.mp4", b"x" * 100, "video/mp4")})
+    assert response.status_code == 413
+    assert list(staging.iterdir()) == []
+

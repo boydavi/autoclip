@@ -126,6 +126,38 @@ class TestStateChangingRequests:
         assert client.get("/api/health", headers=EVIL).status_code == 200
 
 
+class TestHostCheck:
+    READS = ("/api/settings", "/api/sources", "/api/jobs", "/api/music")
+
+    @pytest.mark.parametrize("path", READS)
+    def test_a_rebinding_host_cannot_read(self, client: TestClient, path: str) -> None:
+        assert client.get(path, headers={"host": "evil.example:8765"}).status_code == 403
+
+    @pytest.mark.parametrize(
+        "host", ["localhost:8765", "127.0.0.1:8765", "[::1]:8765", "10.0.0.5:8765"]
+    )
+    def test_localhost_and_ip_addresses_can_read(self, client: TestClient, host: str) -> None:
+        assert client.get("/api/music", headers={"host": host}).status_code == 200
+
+    @pytest.mark.parametrize("host", ["", "[::1", "localhost.evil.example"])
+    def test_a_missing_or_malformed_host_is_refused(self, client: TestClient, host: str) -> None:
+        assert client.get("/api/music", headers={"host": host}).status_code == 403
+
+    def test_health_stays_open(self, client: TestClient) -> None:
+        assert client.get("/api/health", headers={"host": "evil.example"}).status_code == 200
+
+    def test_the_host_of_a_listed_origin_can_read(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with make_client(monkeypatch, **{ENV_ALLOWED_ORIGINS: "https://tool.example"}) as client:
+            assert client.get("/api/music", headers={"host": "tool.example"}).status_code == 200
+
+    def test_with_an_api_key_the_token_is_the_guard(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        with make_client(monkeypatch, **{app_module.ENV_API_KEY: "s3cret"}) as client:
+            proxied = {"host": "proxy.example"}
+            assert client.get("/api/music", headers=proxied).status_code == 401
+            ok = client.get("/api/music", headers=proxied | {"Authorization": "Bearer s3cret"})
+            assert ok.status_code == 200
+
+
 class TestConfiguredOrigins:
     def test_listed_origin_is_allowed(self, monkeypatch: pytest.MonkeyPatch) -> None:
         env = {ENV_ALLOWED_ORIGINS: "https://tool.example/, http://10.0.0.5:3000"}

@@ -24,7 +24,7 @@ def client(autoclip_home, monkeypatch: pytest.MonkeyPatch) -> Iterator[TestClien
     # are about the HTTP contract, and a worker racing to pick jobs up would
     # make every status assertion flaky. The worker has its own tests.
     monkeypatch.setenv(app_module.ENV_NO_WORKER, "1")
-    with TestClient(create_app()) as test_client:
+    with TestClient(create_app(), base_url="http://localhost") as test_client:
         yield test_client
 
 

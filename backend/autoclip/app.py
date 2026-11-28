@@ -92,7 +92,10 @@ def origin_allowed(origin: str, host: str, allowed: frozenset[str]) -> bool:
 
 def _is_trusted_host(host: str) -> bool:
     """``localhost`` or an IP literal: names an attacker's DNS cannot hijack."""
-    name = urlsplit(f"//{host.strip()}").hostname or ""
+    try:
+        name = urlsplit(f"//{host.strip()}").hostname or ""
+    except ValueError:
+        return False
     if name == "localhost":
         return True
     try:
@@ -100,6 +103,37 @@ def _is_trusted_host(host: str) -> bool:
     except ValueError:
         return False
     return True
+
+
+class _HostCheckMiddleware(BaseHTTPMiddleware):
+    """Refuse /api/* requests addressed to a host name AutoClip was not told about.
+
+    This closes DNS rebinding for *reads*: a page on ``evil.example`` re-pointed at
+    127.0.0.1 is same-origin to the browser and could otherwise read settings, jobs
+    and media. ``localhost``, IP addresses and the hosts of listed origins pass.
+    Only used without ``AUTOCLIP_API_KEY`` (with a key, such a page has no token).
+    The health endpoint is exempt, as for auth.
+    """
+
+    def __init__(self, app, *, allowed: frozenset[str]) -> None:
+        super().__init__(app)
+        self._hosts = frozenset(urlsplit(origin).netloc for origin in allowed)
+
+    async def dispatch(self, request: Request, call_next):
+        path = request.url.path
+        if path.startswith("/api/") and path != "/api/health":
+            host = request.headers.get("host", "").strip().lower()
+            if host not in self._hosts and not _is_trusted_host(host):
+                log.warning("Blocked %s %s for unknown host %r.", request.method, path, host)
+                return JSONResponse(
+                    status_code=403,
+                    content={
+                        "detail": "Unknown host name.",
+                        "hint": f"Open AutoClip by localhost or its IP address, add its address to "
+                        f"{ENV_ALLOWED_ORIGINS}, or set {ENV_API_KEY}.",
+                    },
+                )
+        return await call_next(request)
 
 
 class _OriginCheckMiddleware(BaseHTTPMiddleware):
@@ -206,6 +240,7 @@ def create_app() -> FastAPI:
             "AUTOCLIP_API_KEY is not set — all API endpoints are unauthenticated. "
             "Set it before exposing AutoClip beyond localhost."
         )
+        app.add_middleware(_HostCheckMiddleware, allowed=_allowed_origins())
 
     # Added after the auth middleware so it runs first (the last one added is
     # outermost): a cross-site request is refused before auth is even consulted.
